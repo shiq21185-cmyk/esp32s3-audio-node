@@ -1,0 +1,29 @@
+# ---- credentials ----
+firmware/audio-node/main/secrets.h
+*.pem
+.env
+
+# ---- ESP-IDF build output ----
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- captured audio / test artefacts ----
+*.wav
+*.pcm
+*.raw
+!docs/**/*.wav
+
+# ---- editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

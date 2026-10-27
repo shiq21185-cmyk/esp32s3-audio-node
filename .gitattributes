@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+# keep binaries binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.wav binary
+*.bin binary

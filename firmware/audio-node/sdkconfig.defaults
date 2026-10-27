@@ -1,0 +1,37 @@
+# Defaults for `esp32s3-audio-node`.
+#
+# These are written to be safe on *any* ESP32-S3 module rather than
+# optimal for one particular board. The two things people get wrong:
+#
+#   * PSRAM: this firmware does not use PSRAM at all (buffers are a few
+#     KB of static RAM), so it is OFF by default. Turn it on only if your
+#     module has it, and use OCT only for R8 modules -- a quad (R2)
+#     module configured for OCT refuses to boot.
+#   * Flash size: 8 MB is assumed. Larger modules work unchanged, they
+#     just use 8 MB of it. Raise it if you want the space.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---- flash ----
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# ---- PSRAM: off by default, see note above ----
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_OCT=y
+# CONFIG_SPIRAM_SPEED_80M=y
+
+# ---- CPU ----
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ---- Wi-Fi / lwIP: headroom for continuous UDP streaming ----
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+
+# ---- logging ----
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
