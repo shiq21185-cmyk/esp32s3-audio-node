@@ -271,6 +271,7 @@ docs/protocol.md              UDP 线协议
 docs/protocol-mqtt.md         MQTT 线协议（含自建 mosquitto 步骤）
 docs/architecture.md          UDP 版架构、线程、延迟
 docs/architecture-mqtt.md     MQTT 版架构、任务划分、限流实测、失败记录
+docs/faq.md                   为什么这么设计（UDP 还是 MQTT、各个取舍的来由）
 ```
 
 ---
