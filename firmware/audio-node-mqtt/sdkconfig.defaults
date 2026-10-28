@@ -1,0 +1,48 @@
+# Defaults for `firmware/audio-node-mqtt`.
+#
+# Unlike the UDP firmware, this one really wants PSRAM: the speaker buffer is
+# 256 KB (8 seconds of mono 16 kHz) and the Opus codec tasks run with 40 KB
+# stacks. Both are allocated from PSRAM so the internal RAM stays free for
+# Wi-Fi + TLS. Without PSRAM it still boots (the speaker buffer falls back to
+# 64 KB in internal RAM) but you will see "PSRAM 建喇叭缓冲失败" and shorter
+# buffering.
+#
+#   * PSRAM MODE: OCT (8-line) is for R8 modules. A quad PSRAM module (R2)
+#     configured for OCT will not boot -- comment the OCT line out in that case.
+#   * Flash: 8 MB is assumed; larger modules work unchanged. The app is
+#     ~1.1 MB with the Opus codec linked in, so the LARGE single-app table
+#     (1.5 MB factory partition) is required.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---- flash ----
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# ---- PSRAM (OCT / 8-line, for R8 modules) ----
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---- CPU ----
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ---- Wi-Fi / lwIP: headroom for continuous streaming ----
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+
+# ---- MQTT: TLS handshake + keepalive needs a bigger stack than the default ----
+CONFIG_MQTT_TASK_STACK_SIZE=6144
+
+# ---- logging: raise to DEBUG if you need to see MQTT internals ----
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

@@ -1,5 +1,5 @@
 # ---- credentials ----
-firmware/audio-node/main/secrets.h
+firmware/*/main/secrets.h
 *.pem
 .env
 
