@@ -1,8 +1,38 @@
+# ---- ESP-IDF 构建产物 ----
 build/
 sdkconfig
 sdkconfig.old
 managed_components/
-node_modules/
+dependencies.lock
 *.bin
 *.elf
 *.map
+
+# ---- 凭据（绝不入库）----
+# 固件里的 Wi-Fi 密码 / MQTT 账号密码。只提交 .example。
+firmware/**/main/secrets.h
+*.pem
+.env
+
+# ---- Python ----
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 抓下来的音频 / 测试产物 ----
+*.wav
+*.pcm
+*.raw
+listen/
+
+# ---- 临时脚本与实验（57MB 的实验场，全是排查过程中写的一次性东西）----
+.tmp/
+.smoke/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

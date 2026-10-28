@@ -1,0 +1,6 @@
+# Windows 批处理必须是 CRLF，否则 cmd.exe 会把每一行拆成碎片执行。
+# 症状：双击 .cmd/.bat 时刷出 "'p' 不是内部或外部命令"、"'le' 不是..." 这种
+#       按字符/按词切碎的报错（因为我写文件时用的是 LF）。
+# 这条规则对 rot 和 qq-bridge-deploy 两个仓库都适用。
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
