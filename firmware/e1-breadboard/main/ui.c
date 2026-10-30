@@ -15,6 +15,7 @@
  * 判据是 OLED_H > OLED_W，也就是 config.h 里 OLED_ROT 设成了竖的那种。
  */
 #include "ui.h"
+#include "sprite.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -35,17 +36,23 @@ static const char *TAG = "ui";
 static ui_status_t (*s_snapshot)(void);
 static bool s_started;
 
+#if !PORTRAIT
 /* 眨眼/说话动画都靠这两个量：一个是"下次眨眼时间"，一个是"眨眼结束时间" */
 static int64_t s_blink_at_us;
 static int64_t s_blink_end_us;
+#endif
+#if !PORTRAIT
 static uint32_t s_rng = 0x1234567u;
+#endif
 
+#if !PORTRAIT
 static uint32_t rng_next(void)
 {
     /* 只用来看动画，不要求质量；省一个 rand() 的依赖 */
     s_rng = s_rng * 1103515245u + 12345u;
     return (s_rng >> 16) & 0x7fffu;
 }
+#endif
 
 static int64_t now_us(void) { return esp_timer_get_time(); }
 
@@ -94,6 +101,7 @@ static void ellipse_fill(int cx, int cy, int rx, int ry, bool on)
     }
 }
 
+#if !PORTRAIT
 static void fill_ellipse(int cx, int cy, int rx, int ry)
 {
     ellipse_fill(cx, cy, rx, ry, true);
@@ -112,6 +120,7 @@ static void thick_line(int x0, int y0, int x1, int y1, int w)
         oled_fill(x - r, y - r, w, w, true);
     }
 }
+#endif
 
 /* ================= 顶部状态栏 ================= */
 static void draw_wifi(int x, int y, bool on)
@@ -222,103 +231,58 @@ static void draw_face_landscape(const ui_status_t *st, ui_state_t s, bool blink,
 
 /* ================= 瘦小人（竖屏版） ================= */
 #if PORTRAIT
-/* 64 宽 128 高：横着放不下什么，竖着正好塞一个细长的小人。
+/* 64 宽 128 高：脸和身体是**一张点阵图**（sprite.h），不再用几何图元拼。
  *
- * 排版是在 PC 上按 1:1 像素反复试出来的（.tmp/figure_lab.py），有两条硬规矩：
- *   1) 部件之间必须留 1px 缝，否则实心块会糊成一坨黑；
- *   2) 手臂要从躯干外侧起笔，贴着躯干边线画会让轮廓变成 3px 粗的边。
- * 64x128 上能看清的最小"脸"是：实心圆脑袋 + 两个挖黑的方形眼窝 + 一条嘴。
- * 更小（r=10 以下）试过，眼睛和脑袋的留白不够，看着像两个洞。
+ * 为什么换掉手画：64x128/1bpp 上"头发、脸、衣服"三者同色，靠黑缝区分时
+ * 每一种缝都会读成别的东西（兜帽/头盔/边框/门框）。试了二十多版之后认输，
+ * 改成把 GPT 出的线稿直接描成点阵（.tmp/trace4.py：alpha 取身形 + 亮度取黑线），
+ * 白身体挖黑线，一眼就能读出双马尾、鳍耳、眼睛、裙子和鲸尾。
  *
- * 纵向预算：状态栏 0..8 / 头 16..40 / 脖子 40..42 / 躯干 42..74
- *           / 腿 75..95 / 地面 96 / 电平条 110..117
+ * 动的东西只有一处：**说话时嘴的开合**（主人 m02323 定的：不做别的表情）。
  */
-static void draw_figure(const ui_status_t *st, ui_state_t s, bool blink, int64_t t_ms)
+static void draw_sprite(void)
 {
-    const int cx = OLED_W / 2;        /* 32 */
-    const int head_y = 28, head_r = 12;
-    const int body_top = 42, body_bot = 74;
-
-    /* --- 头：实心圆，眼睛靠挖黑才有对比（纯描边看不见） --- */
-    fill_ellipse(cx, head_y, head_r, head_r);
-    /* 呆毛：头顶偏右的一小撮。不画的话正圆脑袋像颗棋子。 */
-    thick_line(cx + 4, head_y - head_r + 2, cx + 8, head_y - head_r - 2, 2);
-
-    if (s == ST_OFFLINE) {
-        /* 掉线：眼睛压成两条短横线，嘴也拉平 —— 一眼看出"没醒" */
-        oled_fill(cx - 7, head_y - 1, 5, 2, false);
-        oled_fill(cx + 2, head_y - 1, 5, 2, false);
-        oled_fill(cx - 3, head_y + 5, 7, 1, false);
-        (void)blink;
-    } else {
-        int ey = head_y - 1;
-        int d = (s == ST_LISTEN) ? 5 : 4;      /* 睁大 = 在听 */
-        for (int k = -1; k <= 1; k += 2) {
-            int ex = cx + k * 5;
-            if (blink) {
-                oled_fill(ex - 2, ey, 5, 2, false);
-                continue;
+    for (int y = 0; y < OLED_H; y++) {
+        const uint8_t *row = k_sprite[y];
+        for (int b = 0; b < OLED_W / 8; b++) {
+            uint8_t v = row[b];
+            if (!v) continue;
+            for (int i = 0; i < 8; i++) {
+                if (v & (1u << i)) oled_pixel(b * 8 + i, y, true);
             }
-            oled_fill(ex - d / 2, ey - d / 2, d, d, false);
-            oled_pixel(ex - d / 2, ey - d / 2, true);   /* 左上高光 */
-        }
-
-        /* 嘴 */
-        int my = head_y + 6;
-        if (s == ST_SPEAK) {
-            double ph = (double)(t_ms % 200) / 200.0 * 6.2831853;
-            int h = 1 + (int)(2.5 * fabs(sin(ph)));
-            oled_fill(cx - 2, my - h / 2, 5, h, false);
-        } else if (s == ST_LISTEN) {
-            oled_fill(cx - 1, my - 1, 3, 3, false);
-        } else {
-            oled_fill(cx - 2, my, 5, 1, false);
         }
     }
-
-    /* --- 脖子：比躯干窄，和头之间不贴死 --- */
-    oled_fill(cx - 2, head_y + head_r - 1, 5, body_top - (head_y + head_r) + 1, true);
-
-    /* --- 躯干：上窄下宽的实心梯形（13 → 17 px 宽） --- */
-    for (int y = body_top; y <= body_bot; y++) {
-        int k = (y - body_top) * 100 / (body_bot - body_top);   /* 0..100 */
-        int half = 6 + k * 2 / 100;
-        oled_fill(cx - half, y, half * 2 + 1, 1, true);
-    }
-
-    /* --- 手臂：待机垂着，在听抬起来，说话跟着摆 ---
-     * x 从 ±10 起笔（躯干在肩膀处半宽 7），留 2px 缝。 */
-    int sy = body_top + 3;
-    if (s == ST_LISTEN) {
-        thick_line(cx - 10, sy, cx - 14, sy - 9, 2);
-        thick_line(cx + 10, sy, cx + 14, sy - 9, 2);
-    } else if (s == ST_SPEAK) {
-        int sw = (int)(2.0 * sin((double)(t_ms % 420) / 420.0 * 6.2831853));
-        thick_line(cx - 10, sy, cx - 14, body_bot - 6 + sw, 2);
-        thick_line(cx + 10, sy, cx + 14, body_bot - 6 - sw, 2);
-    } else {
-        thick_line(cx - 10, sy, cx - 14, body_bot - 6, 2);
-        thick_line(cx + 10, sy, cx + 14, body_bot - 6, 2);
-    }
-
-    /* --- 腿：比躯干窄，中间留缝 --- */
-    thick_line(cx - 3, body_bot + 1, cx - 5, body_bot + 18, 3);
-    thick_line(cx + 3, body_bot + 1, cx + 5, body_bot + 18, 3);
-    /* --- 脚：向外的两根小横线；地面一条长线，让小人站得住 --- */
-    oled_fill(cx - 9, body_bot + 19, 6, 2, true);
-    oled_fill(cx + 4, body_bot + 19, 6, 2, true);
-    oled_hline(cx - 12, body_bot + 22, 25);
-
-    (void)st;
 }
 
+/* 嘴的窗口：底图上嘴在 (31..32, 45..46)，左右不能碰到眼睛（左眼到 x=28、
+ * 右眼从 x=34 起），上下留到脸颊和下巴之间。 */
+#define MOUTH_X0 28
+#define MOUTH_X1 34
+#define MOUTH_Y0 42
+#define MOUTH_Y1 49
+
+static void draw_mouth(ui_state_t s, int64_t t_ms)
+{
+    if (s != ST_SPEAK) return;         /* 其它状态保持底图原样 */
+
+    /* 先把窗口恢复成底图（否则黑嘴会一层层叠上去越张越大） */
+    for (int y = MOUTH_Y0; y <= MOUTH_Y1; y++) {
+        for (int x = MOUTH_X0; x <= MOUTH_X1; x++) {
+            bool on = (k_sprite[y][x >> 3] >> (x & 7)) & 1;
+            oled_pixel(x, y, on);
+        }
+    }
+    double ph = (double)(t_ms % 220) / 220.0 * 6.2831853;
+    int ry = 1 + (int)(2.2 * fabs(sin(ph)));     /* 1..3 */
+    ellipse_fill(31, 45, 1 + ry / 2, ry, false);
+}
 #endif /* PORTRAIT */
 
 /* ================= 电平条 ================= */
 static void draw_meter(const ui_status_t *st)
 {
 #if PORTRAIT
-    const int y = OLED_H - 16, h = 7;
+    const int y = OLED_H - 8, h = 7;      /* 点阵底图地面线在 y=117，电平条让到最底 */
     const int x = 6, w = OLED_W - 12;
     oled_frame(x, y, w, h);
     int pct = level_pct(st->rms, st->floor);
@@ -371,7 +335,9 @@ static void ui_task(void *arg)
 {
     (void)arg;
     int64_t t0 = now_us();
+#if !PORTRAIT
     s_blink_at_us = t0 + 2500000;
+#endif
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -381,20 +347,24 @@ static void ui_task(void *arg)
         int64_t t = now_us();
         int64_t t_ms = (t - t0) / 1000;
 
-        /* 眨眼：3~6 秒一次，闭 120ms。随机的目的是别让两块板/两轮演示同步。 */
+#if !PORTRAIT
+        /* 眨眼：3~6 秒一次，闭 120ms。随机的目的是别让两块板/两轮演示同步。
+         * 竖屏是点阵小人，只动嘴（主人定的），所以这段只在横屏编。 */
         bool blink = false;
         if (t >= s_blink_at_us && t >= s_blink_end_us) {
             s_blink_end_us = t + 120000;
             s_blink_at_us = s_blink_end_us + 3000000 + (int64_t)(rng_next() % 3000000);
         }
         if (t < s_blink_end_us) blink = true;
+#endif
 
         ui_state_t s = pick_state(&st);
 
         oled_clear();
         draw_status(&st, s);
 #if PORTRAIT
-        draw_figure(&st, s, blink, t_ms);
+        draw_sprite();
+        draw_mouth(s, t_ms);
 #else
         draw_face_landscape(&st, s, blink, t_ms);
 #endif
