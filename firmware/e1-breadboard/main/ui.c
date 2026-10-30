@@ -275,22 +275,30 @@ static void draw_mouth(ui_state_t s, int64_t t_ms)
     oled_pixel(30, 45, true); oled_pixel(32, 45, true);
     (void)t_ms;
 }
-/* 尾巴：**剪切式**摆动（不是绕轴旋转）。
- * 旋转那一版实机上尾巴根部会离开身体，露出一条黑缝。
- * 现在让位移随 tx 线性增长：根部 tx=0 永远不动，只有鳍尖上下走 ±3.5px，
- * 所以永远不会脱开；一个来回 2 秒。 */
+/* 尾巴：绕裙子边上的 (47.5, 77) 转，±15°、2 秒一个来回。
+ *
+ * 它是"从裙子后面钻出来"的，不是长在身上 —— 所以转轴放在裙子边缘而不是尾尖，
+ * 位移才有"从裙子后面甩出来"的感觉，且根部几乎不动，不会飞出去。
+ * 之前两版都不对：①绕尾尖转 ⇒ 根部被甩离身体露黑缝；②剪切式 ⇒ 整条尾巴上下平移，
+ * 看着像在飘，不像在摆。
+ */
 static void draw_tail(int64_t t_ms)
 {
     double ph = (double)(t_ms % 2000) / 2000.0 * 6.2831853;
-    double amp = 3.5 * sin(ph);
-    for (int ty = 0; ty < TAIL_H; ty++) {
-        for (int tx = 0; tx < TAIL_W; tx++) {
-            if (!((k_tail[ty][tx >> 3] >> (tx & 7)) & 1)) continue;
-            int dy = (int)(amp * (double)tx / (double)(TAIL_W - 1)
-                           + (amp >= 0 ? 0.5 : -0.5));
-            int x = TAIL_X0 + tx, y = TAIL_Y0 + ty + dy;
-            if (x < 0 || x >= OLED_W || y < 0 || y >= OLED_H) continue;
-            oled_pixel(x, y, true);
+    double ang = 15.0 * sin(ph) * 3.14159265358979 / 180.0;
+    double sa = sin(ang), ca = cos(ang);
+    const double px = TAIL_PIVOT_X, py = TAIL_PIVOT_Y;
+
+    for (int y = TAIL_Y0 - 6; y < TAIL_Y0 + TAIL_H + 6; y++) {
+        if (y < 0 || y >= OLED_H) continue;
+        for (int x = TAIL_X0 - 3; x < TAIL_X0 + TAIL_W + 6; x++) {
+            if (x < 0 || x >= OLED_W) continue;
+            double dx = (double)x - px, dy = (double)y - py;
+            double sx = px + dx * ca + dy * sa;
+            double sy = py - dx * sa + dy * ca;
+            int tx = (int)(sx + 0.5) - TAIL_X0, ty = (int)(sy + 0.5) - TAIL_Y0;
+            if (tx < 0 || tx >= TAIL_W || ty < 0 || ty >= TAIL_H) continue;
+            if ((k_tail[ty][tx >> 3] >> (tx & 7)) & 1) oled_pixel(x, y, true);
         }
     }
 }
