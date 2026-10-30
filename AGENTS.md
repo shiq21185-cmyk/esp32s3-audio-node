@@ -80,6 +80,24 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               （`mqtt_audio.py --base X tone`，写成 `tone --base X` 会 unrecognized）。
               ⚠️ 直接 `body_mqtt.Link(base=...)` 会 `Bad user name or password` ——
               账号密码在控制台配置里，必须用 `body_config.link_kwargs()` 再覆盖 base。
+            · 🔴 **第一次跑整轮失败，根因不在板子：她的 ASR 起不来。**
+              报 `ASR 模型加载失败：加载模型失败：Invalid port: ':1]'`。
+              根因链：模型本地已有、`HF_HUB_OFFLINE=1` 也设了，但
+              `WhisperModel("small", download_root=...)` 仍会**先建一个 HTTP client**；
+              它读 Windows 系统代理的例外表（FlClash 写进 ProxyOverride 的 `[::1]`），
+              httpx 把 `[::1]` 当 URL 解析 ⇒ `InvalidURL: Invalid port: ':1]'`。
+              ⇒ 系统代理一开，她整条语音链路（含 QQ 语音转写）就哑，而日志只说"模型加载失败"。
+              修（改的是她本体 `qq-bridge-deploy/tools/asr/` 两个文件，非本仓库）：
+                transcribe.py 新增 `local_snapshot()`：本地有快照就返回**目录路径**，绕开 hub；
+                worker.py 先解析本地快照再 `WhisperModel(resolved, ...)`，多打印一行「用本地快照：…」。
+              实测同一份缓存：传 "small" 报错，传目录 955~1186ms 就绪。
+              ⚠️ 若 QQ 侧语音仍哑，重启桥接（`POST /api/restart`）让旧的常驻 worker 换掉。
+            · ✅ **端到端整轮通了（2026-10-30 傍晚，e1 面包板）**：
+              他说「喂?现在可以说话吗?」→ 听写 2384ms；她想了 3373ms 回「能听见，正听着呢。你想说啥？」；
+              下行 33 包 / 3960ms 音频 / **缺料 0** / 最低水位 2395ms / 掉线 0；
+              板子侧写 I2S 4020ms（其中 2400ms 是垫底静音）、溢出 0、残留 buff 2280ms；
+              首音 969ms、念完 4115ms、本轮 7488ms。
+              ⇒ 第三套（果云面包板）的耳朵、嘴、MQTT、TTS、她的大脑，全链路成立。
             · 还没做：一整轮「你说话 → 她回话」的端到端（要用户在场说话），
               以及控制台里把主题前缀切到 whale-8f2a5c31（现在默认还是 d8 那个）。
             · 公开仓库 esp32s3-audio-node 另有一份「通用版」（板型开关 BOARD_INTEGRATED /
