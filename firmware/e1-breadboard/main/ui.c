@@ -1,24 +1,24 @@
-/* 屏幕上的那张脸 + 状态栏。
+/* 屏幕上的那张脸 / 那个小人 + 状态栏。
  *
  * 这不是"仪表盘"，是**表现层**：屋里的人扫一眼就该知道
- *   - 板子在线吗（顶部状态栏：Wi-Fi / MQTT / IP）
- *   - 她现在在听吗（眼睛睁大 + 嘴变成小圈）
- *   - 她正在说吗（嘴一开一合）
+ *   - 板子在线吗（顶部状态栏：Wi-Fi / MQTT / 麦克风）
+ *   - 她现在在听吗（小人抬手 / 眼睛睁大）
+ *   - 她正在说吗（嘴一开一合、手臂轻摆）
  *   - 声音有多大（底部电平条，跟着 rms 走）
  *
- * 为什么用"脸"而不是一堆数字：这套身体的最终目标是"把开心演成动作"，
- * 眼睛和嘴是最省像素、也最容易被读懂的两种状态。数字放在 64 行屏的下半屏。
+ * 为什么用"人"而不是一堆数字：这套身体的最终目标是"把开心演成动作"，
+ * 眼睛和嘴是最省像素、也最容易被读懂的两种状态。
  *
- * ⚠️ 布局原则：**前 32 行永远是一份完整的 UI**。
- *    0.91" 是 128x32、0.96" 是 128x64，这两种屏在 I2C 上长得一模一样、
- *    没法自动分辨（SSD1306 不能回读尺寸）。所以把主 UI 压在前 32 行：
- *    参数写成 32 而屏是 64 —— 上半屏照样对；写成 64 而屏是 32 ——
- *    上半屏也对，只是多出来的那段看不见。猜错不会变成一堆乱码。
+ * 两套版式，按屏幕方向自动选（都是编译期定死的，不占运行开销）：
+ *   竖装（64x128）  —— 一个瘦瘦的小人，从上到下把整块屏用满
+ *   横装（128x64）  —— 一张宽脸 + 底部电平条
+ * 判据是 OLED_H > OLED_W，也就是 config.h 里 OLED_ROT 设成了竖的那种。
  */
 #include "ui.h"
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -29,6 +29,8 @@
 #include "oled.h"
 
 static const char *TAG = "ui";
+
+#define PORTRAIT OLED_PORTRAIT
 
 static ui_status_t (*s_snapshot)(void);
 static bool s_started;
@@ -77,7 +79,41 @@ static int level_pct(int rms, int floor)
     return pct;
 }
 
-/* ---------------- 顶部状态栏 ---------------- */
+/* ================= 基础图形 ================= */
+/* 实心椭圆（整数判据，不引浮点）。on=false = 挖黑（画眼窝/嘴）。
+ * 一开始画的是空心方框，1:1 摆在屏上像两块"眼镜片"，不像脸；
+ * 换成实心 + 挖黑瞳孔之后才像一张脸。 */
+static void ellipse_fill(int cx, int cy, int rx, int ry, bool on)
+{
+    for (int dy = -ry; dy <= ry; dy++) {
+        for (int dx = -rx; dx <= rx; dx++) {
+            if (dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry) {
+                oled_pixel(cx + dx, cy + dy, on);
+            }
+        }
+    }
+}
+
+static void fill_ellipse(int cx, int cy, int rx, int ry)
+{
+    ellipse_fill(cx, cy, rx, ry, true);
+}
+
+/* 粗线段（画手臂/腿用）。Bresenham 太细，直接沿线扫方块。 */
+static void thick_line(int x0, int y0, int x1, int y1, int w)
+{
+    int n = abs(x1 - x0);
+    if (abs(y1 - y0) > n) n = abs(y1 - y0);
+    if (n < 1) n = 1;
+    int r = w / 2;
+    for (int i = 0; i <= n; i++) {
+        int x = x0 + (x1 - x0) * i / n;
+        int y = y0 + (y1 - y0) * i / n;
+        oled_fill(x - r, y - r, w, w, true);
+    }
+}
+
+/* ================= 顶部状态栏 ================= */
 static void draw_wifi(int x, int y, bool on)
 {
     /* 4 根柱子，从 2px 高长到 8px 高；没连上就打一个叉 */
@@ -95,52 +131,43 @@ static void draw_wifi(int x, int y, bool on)
     }
 }
 
-static void draw_status(const ui_status_t *st)
+static void draw_status(const ui_status_t *st, ui_state_t s)
 {
     oled_fill(0, 0, OLED_W, 9, true);          /* 实心白条，字反色 */
 
     /* 左：模式（G=室内门限 / B=随身按键） */
-    oled_text(2, 1, st->mode ? "B" : "G", 1, true);
+    oled_text(1, 1, st->mode ? "B" : "G", 1, true);
 
     /* Wi-Fi 信号柱 */
-    draw_wifi(11, 1, st->wifi_ok);
+    draw_wifi(9, 1, st->wifi_ok);
 
-    /* MQTT：实心方块 = 已连；空心 = 没连 */
-    if (st->mqtt_ok) {
-        oled_fill(24, 2, 6, 6, false);
-    } else {
-        oled_fill(24, 2, 6, 6, false);
-        oled_fill(26, 4, 2, 2, true);
-    }
+    /* MQTT：空心方块 = 已连；中间挖个黑点 = 没连 */
+    oled_fill(22, 2, 6, 6, false);
+    if (!st->mqtt_ok) oled_fill(24, 4, 2, 2, true);
 
-    /* 麦克风开着就在状态栏里点一下，免得只看眼睛误判 */
+    /* 麦克风开着就在状态栏里点一下，免得只看脸误判 */
     if (st->mic_on) {
-        oled_fill(34, 1, 3, 5, false);
-        oled_vline(33, 4, 3);
-        oled_vline(37, 4, 3);
+        oled_fill(31, 1, 3, 5, false);
+        oled_vline(30, 4, 3);
+        oled_vline(34, 5, 2);
     }
 
+#if PORTRAIT
+    /* 竖屏只有 64 px 宽，塞不下 IP —— 右边给一个状态字母，
+     * 掉线和待机在黑白屏上都是"静止的小人"，有个字母就不用猜。 */
+    static const char code[] = { 'O', 'I', 'L', 'S' };
+    char one[2] = { code[s], 0 };
+    oled_text(OLED_W - 7, 1, one, 1, true);
+#else
     /* 右：IP（连上才有；没连上写 no net） */
     const char *right = st->wifi_ok ? (st->ip[0] ? st->ip : "no ip") : "no net";
     int w = oled_text_w(right, 1);
     oled_text(OLED_W - 2 - w, 1, right, 1, true);
+#endif
 }
 
-/* ---------------- 脸 ---------------- */
-/* 实心椭圆（整数判据 dx²ry² + dy²rx² ≤ rx²ry²，不引浮点）。
- * 一开始画的是空心方框，1:1 摆在 128x32 上像两块"眼镜片"，不像眼睛；
- * 换成实心椭圆 + 黑瞳孔之后才像一张脸。 */
-static void fill_ellipse(int cx, int cy, int rx, int ry)
-{
-    for (int dy = -ry; dy <= ry; dy++) {
-        for (int dx = -rx; dx <= rx; dx++) {
-            if (dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry) {
-                oled_pixel(cx + dx, cy + dy, true);
-            }
-        }
-    }
-}
-
+/* ================= 脸（横屏版） ================= */
+#if !PORTRAIT
 static void draw_eye(int cx, int cy, int rx, int ry, bool blink, bool up)
 {
     if (blink || ry <= 1) {
@@ -159,9 +186,9 @@ static void draw_eye(int cx, int cy, int rx, int ry, bool blink, bool up)
     }
 }
 
-static void draw_mouth(ui_state_t s, int64_t t_ms)
+static void draw_mouth_landscape(ui_state_t s, int64_t t_ms)
 {
-    const int cx = 64, y = 20;
+    const int cx = OLED_W / 2, y = 20;
 
     if (s == ST_SPEAK) {
         /* 一开一合：2px 到 7px，周期约 180ms —— 比真实口型快，
@@ -178,7 +205,7 @@ static void draw_mouth(ui_state_t s, int64_t t_ms)
     oled_hline(cx - 6, y, 13);                 /* 平嘴 = 待机 */
 }
 
-static void draw_face(const ui_status_t *st, ui_state_t s, bool blink, int64_t t_ms)
+static void draw_face_landscape(const ui_status_t *st, ui_state_t s, bool blink, int64_t t_ms)
 {
     int rx = 4, ry = 5, cy = 16;      /* 9x11 的眼睛，中心落在 y=16 */
     bool up = false;
@@ -187,13 +214,119 @@ static void draw_face(const ui_status_t *st, ui_state_t s, bool blink, int64_t t
     if (s == ST_OFFLINE) { ry = 1; cy = 18; }    /* 压成一条缝 = 没连线 */
 
     draw_eye(40, cy, rx, ry, blink, up);
-    draw_eye(87, cy, rx, ry, blink, up);
-    draw_mouth(s, t_ms);
+    draw_eye(OLED_W - 41, cy, rx, ry, blink, up);
+    draw_mouth_landscape(s, t_ms);
 }
 
-/* ---------------- 电平条 ---------------- */
+#endif /* !PORTRAIT */
+
+/* ================= 瘦小人（竖屏版） ================= */
+#if PORTRAIT
+/* 64 宽 128 高：横着放不下什么，竖着正好塞一个细长的小人。
+ *
+ * 排版是在 PC 上按 1:1 像素反复试出来的（.tmp/figure_lab.py），有两条硬规矩：
+ *   1) 部件之间必须留 1px 缝，否则实心块会糊成一坨黑；
+ *   2) 手臂要从躯干外侧起笔，贴着躯干边线画会让轮廓变成 3px 粗的边。
+ * 64x128 上能看清的最小"脸"是：实心圆脑袋 + 两个挖黑的方形眼窝 + 一条嘴。
+ * 更小（r=10 以下）试过，眼睛和脑袋的留白不够，看着像两个洞。
+ *
+ * 纵向预算：状态栏 0..8 / 头 16..40 / 脖子 40..42 / 躯干 42..74
+ *           / 腿 75..95 / 地面 96 / 电平条 110..117
+ */
+static void draw_figure(const ui_status_t *st, ui_state_t s, bool blink, int64_t t_ms)
+{
+    const int cx = OLED_W / 2;        /* 32 */
+    const int head_y = 28, head_r = 12;
+    const int body_top = 42, body_bot = 74;
+
+    /* --- 头：实心圆，眼睛靠挖黑才有对比（纯描边看不见） --- */
+    fill_ellipse(cx, head_y, head_r, head_r);
+    /* 呆毛：头顶偏右的一小撮。不画的话正圆脑袋像颗棋子。 */
+    thick_line(cx + 4, head_y - head_r + 2, cx + 8, head_y - head_r - 2, 2);
+
+    if (s == ST_OFFLINE) {
+        /* 掉线：眼睛压成两条短横线，嘴也拉平 —— 一眼看出"没醒" */
+        oled_fill(cx - 7, head_y - 1, 5, 2, false);
+        oled_fill(cx + 2, head_y - 1, 5, 2, false);
+        oled_fill(cx - 3, head_y + 5, 7, 1, false);
+        (void)blink;
+    } else {
+        int ey = head_y - 1;
+        int d = (s == ST_LISTEN) ? 5 : 4;      /* 睁大 = 在听 */
+        for (int k = -1; k <= 1; k += 2) {
+            int ex = cx + k * 5;
+            if (blink) {
+                oled_fill(ex - 2, ey, 5, 2, false);
+                continue;
+            }
+            oled_fill(ex - d / 2, ey - d / 2, d, d, false);
+            oled_pixel(ex - d / 2, ey - d / 2, true);   /* 左上高光 */
+        }
+
+        /* 嘴 */
+        int my = head_y + 6;
+        if (s == ST_SPEAK) {
+            double ph = (double)(t_ms % 200) / 200.0 * 6.2831853;
+            int h = 1 + (int)(2.5 * fabs(sin(ph)));
+            oled_fill(cx - 2, my - h / 2, 5, h, false);
+        } else if (s == ST_LISTEN) {
+            oled_fill(cx - 1, my - 1, 3, 3, false);
+        } else {
+            oled_fill(cx - 2, my, 5, 1, false);
+        }
+    }
+
+    /* --- 脖子：比躯干窄，和头之间不贴死 --- */
+    oled_fill(cx - 2, head_y + head_r - 1, 5, body_top - (head_y + head_r) + 1, true);
+
+    /* --- 躯干：上窄下宽的实心梯形（13 → 17 px 宽） --- */
+    for (int y = body_top; y <= body_bot; y++) {
+        int k = (y - body_top) * 100 / (body_bot - body_top);   /* 0..100 */
+        int half = 6 + k * 2 / 100;
+        oled_fill(cx - half, y, half * 2 + 1, 1, true);
+    }
+
+    /* --- 手臂：待机垂着，在听抬起来，说话跟着摆 ---
+     * x 从 ±10 起笔（躯干在肩膀处半宽 7），留 2px 缝。 */
+    int sy = body_top + 3;
+    if (s == ST_LISTEN) {
+        thick_line(cx - 10, sy, cx - 14, sy - 9, 2);
+        thick_line(cx + 10, sy, cx + 14, sy - 9, 2);
+    } else if (s == ST_SPEAK) {
+        int sw = (int)(2.0 * sin((double)(t_ms % 420) / 420.0 * 6.2831853));
+        thick_line(cx - 10, sy, cx - 14, body_bot - 6 + sw, 2);
+        thick_line(cx + 10, sy, cx + 14, body_bot - 6 - sw, 2);
+    } else {
+        thick_line(cx - 10, sy, cx - 14, body_bot - 6, 2);
+        thick_line(cx + 10, sy, cx + 14, body_bot - 6, 2);
+    }
+
+    /* --- 腿：比躯干窄，中间留缝 --- */
+    thick_line(cx - 3, body_bot + 1, cx - 5, body_bot + 18, 3);
+    thick_line(cx + 3, body_bot + 1, cx + 5, body_bot + 18, 3);
+    /* --- 脚：向外的两根小横线；地面一条长线，让小人站得住 --- */
+    oled_fill(cx - 9, body_bot + 19, 6, 2, true);
+    oled_fill(cx + 4, body_bot + 19, 6, 2, true);
+    oled_hline(cx - 12, body_bot + 22, 25);
+
+    (void)st;
+}
+
+#endif /* PORTRAIT */
+
+/* ================= 电平条 ================= */
 static void draw_meter(const ui_status_t *st)
 {
+#if PORTRAIT
+    const int y = OLED_H - 16, h = 7;
+    const int x = 6, w = OLED_W - 12;
+    oled_frame(x, y, w, h);
+    int pct = level_pct(st->rms, st->floor);
+    int inner = w - 4;
+    int fill_w = inner * pct / 100;
+    if (fill_w < 1) fill_w = 1;
+    oled_fill(x + 2, y + 2, fill_w, h - 4, true);
+#else
     const int y = 25, h = 7;
     oled_frame(0, y, OLED_W, h);
     int pct = level_pct(st->rms, st->floor);
@@ -203,11 +336,17 @@ static void draw_meter(const ui_status_t *st)
         if (w < 1) w = 1;
         oled_fill(2, y + 2, w, h - 4, true);
     }
+#endif
 }
 
-/* ---------------- 下半屏（只有 128x64 才有地方） ---------------- */
+/* ================= 只有大屏才画得下的数字区 ================= */
 static void draw_extra(const ui_status_t *st, ui_state_t s)
 {
+#if PORTRAIT
+    /* 竖屏没有横向空间摆 "UP 12 DN 34" 这种长串，所以只在
+     * 电平条上面留一行极简状态：有按键窗口就写 BTN。 */
+    (void)st; (void)s;
+#else
     char buf[24];
     if (oled_height() < 64) return;
 
@@ -225,6 +364,7 @@ static void draw_extra(const ui_status_t *st, ui_state_t s)
     static const char *names[] = { "OFFLINE", "IDLE", "LISTEN", "SPEAK" };
     snprintf(buf, sizeof(buf), "%s%s", names[s], st->btn_window ? " BTN" : "");
     oled_text(0, 58, buf, 1, false);
+#endif
 }
 
 static void ui_task(void *arg)
@@ -252,8 +392,12 @@ static void ui_task(void *arg)
         ui_state_t s = pick_state(&st);
 
         oled_clear();
-        draw_status(&st);
-        draw_face(&st, s, blink, t_ms);
+        draw_status(&st, s);
+#if PORTRAIT
+        draw_figure(&st, s, blink, t_ms);
+#else
+        draw_face_landscape(&st, s, blink, t_ms);
+#endif
         draw_meter(&st);
         draw_extra(&st, s);
         oled_flush();
@@ -270,5 +414,5 @@ void ui_start(ui_status_t (*snapshot)(void))
     s_snapshot = snapshot;
     s_started = true;
     xTaskCreate(ui_task, "ui", 4096, NULL, 2, NULL);
-    ESP_LOGI(TAG, "UI 起来了（10 fps）");
+    ESP_LOGI(TAG, "UI 起来了（10 fps，%s）", PORTRAIT ? "竖屏小人" : "横屏脸");
 }

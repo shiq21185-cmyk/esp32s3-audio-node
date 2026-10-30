@@ -35,16 +35,53 @@ int oled_text_w(const char *s, int scale) { (void)s; (void)scale; return 0; }
 #else  /* OLED_ENABLE */
 
 /* SSD1306 的显存是"页"结构：一页 8 行，每页里每个字节是 8 个纵向像素
- * （bit0 在最上）。这正好就是我们的帧缓冲布局，不需要再做转换：
- *   fb[(y / 8) * 128 + x] 的 bit (y % 8) */
-static uint8_t s_fb[OLED_W * OLED_HEIGHT / 8];
+ * （bit0 在最上）。帧缓冲直接照这个布局放，flush 时整块 memcpy 过去：
+ *   fb[(py / 8) * 128 + px] 的 bit (py % 8)
+ *
+ * 注意缓冲永远是**面板**尺寸（128 x OLED_PANEL_H），跟屏幕怎么装无关 ——
+ * 竖装只是 oled_pixel() 里把逻辑坐标换成面板坐标。 */
+static uint8_t s_fb[OLED_PANEL_W * OLED_PANEL_H / 8];
 
 static esp_lcd_panel_io_handle_t s_io;
 static esp_lcd_panel_handle_t s_panel;
 static bool s_ready;
 
+/* 朝向 = 旋转 + 可选的水平镜像（两者组合起来正好是二面体群 D4 的 8 个元素）。
+ * 下面这张表就是"逻辑坐标 -> 面板坐标"的全部可能性，一个 #if 都不用写。
+ *   r = OLED_ROT & 3  : 0=不转 1=逆时针90 2=180 3=顺时针90
+ *   m = OLED_ROT >> 2 : 1 = 先在逻辑画布上左右翻一下
+ */
+static inline void logical_to_panel(int x, int y, int *px, int *py)
+{
+#if (OLED_ROT >= 4)
+    x = OLED_W - 1 - x;
+#endif
+#if ((OLED_ROT & 3) == 0)
+    *px = x;
+    *py = y;
+#elif ((OLED_ROT & 3) == 1)
+    *px = y;
+    *py = OLED_PANEL_H - 1 - x;
+#elif ((OLED_ROT & 3) == 2)
+    *px = OLED_PANEL_W - 1 - x;
+    *py = OLED_PANEL_H - 1 - y;
+#else
+    *px = OLED_PANEL_W - 1 - y;
+    *py = x;
+#endif
+}
+
+static inline void panel_pixel(int px, int py, bool on)
+{
+    if (px < 0 || py < 0 || px >= OLED_PANEL_W || py >= OLED_PANEL_H) return;
+    uint8_t *p = &s_fb[(py >> 3) * OLED_PANEL_W + px];
+    uint8_t bit = (uint8_t)(1u << (py & 7));
+    if (on) *p |= bit;
+    else    *p &= (uint8_t)~bit;
+}
+
 bool oled_ready(void) { return s_ready; }
-int  oled_height(void) { return OLED_HEIGHT; }
+int  oled_height(void) { return OLED_H; }
 
 bool oled_init(void)
 {
@@ -98,13 +135,14 @@ bool oled_init(void)
         .bits_per_pixel = 1,
     };
     esp_lcd_panel_ssd1306_config_t ssd_cfg = {
-        .height = OLED_HEIGHT,
+        .height = OLED_PANEL_H,
     };
     panel_cfg.vendor_config = &ssd_cfg;
 
     err = esp_lcd_new_panel_ssd1306(s_io, &panel_cfg, &s_panel);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "ssd1306 panel 建不起来（%s）", esp_err_to_name(err));
+        ESP_LOGW(TAG, "ssd1306 panel 建不起来（%s），试过 OLED_HEIGHT=%d",
+                 esp_err_to_name(err), OLED_PANEL_H);
         return false;
     }
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
@@ -113,24 +151,25 @@ bool oled_init(void)
         return false;
     }
     esp_lcd_panel_invert_color(s_panel, false);
-    esp_lcd_panel_mirror(s_panel, OLED_MIRROR_X, OLED_MIRROR_Y);
+    /* 硬件镜像固定关掉：朝向全部在 logical_to_panel() 里做软件映射，
+     * 否则"硬件翻一次 + 软件翻一次"会互相抵消，调起来像在掷骰子。 */
+    esp_lcd_panel_mirror(s_panel, false, false);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
     s_ready = true;
     oled_clear();
     oled_flush();
-    ESP_LOGI(TAG, "屏幕就绪：%dx%d @0x%02X（SDA=%d SCL=%d）",
-             OLED_W, OLED_HEIGHT, OLED_ADDR, PIN_OLED_SDA, PIN_OLED_SCL);
+    ESP_LOGI(TAG, "屏幕就绪：面板 %dx%d，逻辑画布 %dx%d（OLED_ROT=%d），@0x%02X SDA=%d SCL=%d",
+             OLED_PANEL_W, OLED_PANEL_H, OLED_W, OLED_H, OLED_ROT,
+             OLED_ADDR, PIN_OLED_SDA, PIN_OLED_SCL);
     return true;
 }
 
 void oled_pixel(int x, int y, bool on)
 {
-    if (x < 0 || y < 0 || x >= OLED_W || y >= OLED_HEIGHT) return;
-    uint8_t *p = &s_fb[(y >> 3) * OLED_W + x];
-    uint8_t bit = (uint8_t)(1u << (y & 7));
-    if (on) *p |= bit;
-    else    *p &= (uint8_t)~bit;
+    int px, py;
+    logical_to_panel(x, y, &px, &py);
+    panel_pixel(px, py, on);
 }
 
 void oled_clear(void) { memset(s_fb, 0, sizeof(s_fb)); }
@@ -138,7 +177,7 @@ void oled_clear(void) { memset(s_fb, 0, sizeof(s_fb)); }
 void oled_flush(void)
 {
     if (!s_ready) return;
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, OLED_W, OLED_HEIGHT, s_fb);
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, OLED_PANEL_W, OLED_PANEL_H, s_fb);
 }
 
 void oled_fill(int x, int y, int w, int h, bool on)
