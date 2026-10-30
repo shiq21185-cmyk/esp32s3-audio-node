@@ -83,6 +83,24 @@ MQTT 版多用一个按键（一头接按键脚、一头接 GND，按下 = 低�
 PSRAM：UDP 版不需要；**MQTT 版需要 8 MB 八线（N16R8）** —— 喇叭缓冲 256 KB 和 Opus
 编解码任务的栈都放那儿。没有 PSRAM 也能启动（缓冲退回 64 KB），但会看到一条警告。
 
+### 可选：一块屏
+
+MQTT 版还能带一块 **0.96" I2C OLED（SSD1306，128×64）**，走 GPIO41/42：
+
+```
+VCC→3V3   GND→GND   SDA→GPIO41   SCL→GPIO42      地址 0x3C
+```
+
+接上之后屏上会出现**一张会动嘴的小人 + 底部电平条**（竖装），或者**一张宽脸 +
+状态栏（Wi-Fi/MQTT/IP/麦克风）+ 电平条**（横装）。看一眼就知道板子在线没、对端在听没。
+
+**接不接都能跑**：`oled_init()` 先探一次 0x3C，探不到只打一行警告就跳过，
+音频和 MQTT 完全不受影响。
+
+配置在 `main/config.h`：`OLED_ENABLE` / `OLED_HEIGHT`（32=0.91"，64=0.96"）/
+`OLED_ROT`（0 横装，1 或 3 竖装）。细节和"怎么换成你自己的形象"见
+[docs/display.md](docs/display.md)。
+
 ---
 
 ## 快速开始
@@ -269,9 +287,13 @@ firmware/audio-node/          UDP 版固件（ESP-IDF 工程，约 300 行 C）
   main/config.h               引脚 / 采样率 / 端口，改这里就够了
   main/main.c                 Wi-Fi + 两个 I2S + 一个 UDP 循环
 firmware/audio-node-mqtt/     MQTT 版固件（约 1000 行 C + Opus 编解码）
-  main/config.h               broker / topic / 引脚 / 门限 / 缓冲
+  main/config.h               broker / topic / 引脚 / 门限 / 缓冲 / 屏幕
   main/main.c                 MQTT 收发 + 门限 + 双模式 + 心跳
   main/codec.c                Opus 编解码封装
+  main/oled.c                 0.96" SSD1306 驱动（I2C + 1bpp 帧缓冲 + 画点写字）
+  main/ui.c                   10 fps 的绘制任务：状态栏 / 小人 / 电平条
+  main/sprite.h               竖屏那张小人的点阵（换自己的形象就改这里）
+  main/font5x7.c              5x7 ASCII 字库（横屏状态栏用）
   sdkconfig.defaults          分区表 / PSRAM / Wi-Fi 缓冲，别丢
 host/python/
   audio_node.py               UDP 版库 + 命令行（标准库，零依赖）
@@ -279,6 +301,7 @@ host/python/
   examples/                   录 / 放 / 回环 / 语音触发录音
 host/nodejs/                  Node.js 客户端（UDP，零依赖）
 docs/hardware.md              选型、引脚、接线、电源（两套固件通用）
+docs/display.md               屏幕：接线、朝向、界面、换形象、掉线排查
 docs/protocol.md              UDP 线协议
 docs/protocol-mqtt.md         MQTT 线协议（含自建 mosquitto 步骤）
 docs/architecture.md          UDP 版架构、线程、延迟
