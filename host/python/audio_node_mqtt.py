@@ -69,6 +69,8 @@ class Link:
         self.use_tls = use_tls
         self._state: dict = {}
         self._state_at = 0.0
+        self._state_n = 0          # 收到过几条 state —— alive() 靠它认"新到的那条"
+        self._state_bad = 0        # 解析失败的 state 条数（>0 = 固件 payload 被截断）
         self._lock = threading.Lock()
 
         try:
@@ -89,12 +91,21 @@ class Link:
         self._cli.on_connect = self._on_connect
         self._cli.on_message = self._on_message
         self._connected = threading.Event()
+        self._last_error = ""         # 服务器拒连时回的原因（密码错、client_id 冲突…）
         self._audio_sink = None       # 设为 callable 就收音频
 
     # -- 连接 ------------------------------------------------------------
 
     def _on_connect(self, c, u, flags, rc, *extra):
+        # ⚠️ 两个都必须订：只订 state 的话，麦克风音频（audio/up）根本收不到，
+        #    record() 会永远返回空字节 —— 而 state 一切正常，看起来像"板子没开麦"。
         self._cli.subscribe(f"{self.base}/state", qos=0)
+        self._cli.subscribe(f"{self.base}/audio/up", qos=0)
+        # paho 2.x 的 rc 是 ReasonCode，密码错了也会进这里；不看 rc 就置"已连接"
+        # 的写法会让错误密码表现成连上了。
+        if int(getattr(rc, "value", rc)) != 0:
+            self._last_error = f"{rc}"
+            return
         self._connected.set()
 
     def _on_message(self, c, u, msg):
@@ -105,8 +116,20 @@ class Link:
                 with self._lock:
                     self._state = json.loads(msg.payload.decode("utf-8"))
                     self._state_at = time.time()
+                    self._state_n += 1
             except Exception:
-                pass                    # 半截 JSON，重试也不行，丢
+                # 这里原来是个静默 pass，害过人：固件那边的 state 缓冲区一旦装不下
+                # 当前 JSON，snprintf 会静默截断（结尾停在半截 UTF-8 串里），于是
+                # 解析永远失败、self._state 永远是空 —— 但收发其实全在正常跑。
+                # 症状极具误导性：你说"板子没回心跳/没开机"，而板子明明在线。
+                # 所以把坏包数起来，判"不在线"之前先看它。
+                self._state_bad += 1
+                if self._state_bad in (1, 10, 100, 1000):
+                    tail = bytes(msg.payload[-24:])
+                    print(f"[audio_node_mqtt] state JSON 解析失败 "
+                          f"(第 {self._state_bad} 次, {len(msg.payload)} 字节, "
+                          f"结尾 {tail!r}) —— 多半是固件 payload[] 被截断了",
+                          file=sys.stderr)
             return
         if topic == f"{self.base}/audio/up":
             payload = msg.payload
@@ -127,11 +150,21 @@ class Link:
             sink(pcm)
 
     def connect(self, timeout: float = 8.0) -> "Link":
-        self._cli.connect(self.broker, self.port, keepalive=30)
+        try:
+            self._cli.connect(self.broker, self.port, keepalive=30)
+        except Exception as exc:
+            raise RuntimeError(f"连不上 broker {self.broker}:{self.port} —— {exc}")
         self._cli.loop_start()
         if not self._connected.wait(timeout):
             self._cli.loop_stop()
-            raise RuntimeError(f"连不上 broker {self.broker}:{self.port}")
+            why = f" —— 服务器回：{self._last_error}" if self._last_error else ""
+            raise RuntimeError(f"连不上 broker {self.broker}:{self.port}{why}")
+        # 板子空闲时 30 秒才发一条心跳。连上先敲一下，让它立刻回一条 state，
+        # 这样探活只要几百毫秒，不用干等半分钟。
+        try:
+            self.command("PING")
+        except Exception:
+            pass
         return self
 
     def close(self) -> None:
@@ -161,7 +194,12 @@ class Link:
             return dict(self._state)
 
     def wait_state(self, timeout: float = 8.0) -> dict:
-        """发一个 PING 然后等板子回 state。返回 {} = 没有回应。"""
+        """发一个 PING 然后等板子回 state。返回 {} = 没有回应。
+
+        ⚠️ 判"板子在不在"只能靠这个（或等心跳），**不能靠"多久没收到音频包"**：
+           室内模式下安静房间本来就是一个字节都不发，安静和掉线在数据流上
+           长得一模一样。
+        """
         self.command("PING")
         end = time.time() + timeout
         while time.time() < end:
@@ -171,8 +209,40 @@ class Link:
             time.sleep(0.05)
         return {}
 
+    def state_bad(self) -> int:
+        """解析失败的 state 条数。判"板子没开机"之前先看这个：
+        大于 0 说明 state 确实收到了，只是 JSON 被固件截断了。"""
+        with self._lock:
+            return self._state_bad
+
     def ping(self, timeout: float = 5.0) -> bool:
         return bool(self.wait_state(timeout))
+
+    def alive(self, timeout: float = 3.0) -> bool:
+        """敲一下 PING，等一条**新的** state。True = 板子此刻真的在答话。
+
+        为什么不用「多久没收到包」判断掉线：室内模式下安静房间一个字节都不发，
+        安静和掉线在数据流上长得一模一样，只能靠 PING。
+
+        为什么不靠心跳：板子空闲时 30 秒才发一条 state，想靠它几秒内发现掉线
+        就得把心跳提到 5 秒，一个月又是 100MB。反过来由电脑主动敲，敲完立刻回，
+        代价几十字节。拿到一条新的才算活，"之前收到过"不算（那可能是 29 秒前的旧账）。
+        """
+        with self._lock:
+            n0 = self._state_n
+        try:
+            self.command("PING")
+        except Exception:
+            return False
+        end = time.time() + timeout
+        while time.time() < end:
+            with self._lock:
+                if self._state_n > n0:
+                    return True
+            if not self._connected.is_set():
+                return False
+            time.sleep(0.05)
+        return False
 
     def record(self, seconds: float, mic: bool = True) -> bytes:
         """录一段麦克风。板子上的麦克风默认是关的 —— 这里会显式开再关。"""
@@ -398,6 +468,11 @@ def main() -> int:
         if args.cmd in ("ping", "state"):
             st = link.wait_state()
             if not st:
+                if link.state_bad():
+                    print(f"[失败] state 收到了 {link.state_bad()} 条但 JSON 解析失败 "
+                          "—— 固件 payload[] 被截断了，调大后重新烧录"
+                          "（不是板子没开机）", file=sys.stderr)
+                    return 3
                 print("[失败] 8 秒内没收到 state —— 板子没开机 / 没连上 Wi-Fi / "
                       "主题前缀不一致 / broker 不对", file=sys.stderr)
                 return 2
