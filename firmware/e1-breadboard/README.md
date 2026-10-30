@@ -57,7 +57,16 @@ MAX98357   BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7  VIN→5V    GND→GND   GAIN�
 
 ```powershell
 powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard build'"
-powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard -p COM3 flash monitor'"
+powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard -p COM4 flash monitor'"
+```
+
+**这块板是 CH340 串口，不是 d8 那种原生 USB 口**：插上后设备管理器里会出现
+`USB-SERIAL CH340 (COM4)`（`USB\VID_1A86&PID_7523`）。第一次插 Windows 会先报一个
+`CM_PROB_FAILED_INSTALL`（黄色感叹号、没有 COM 号），**等几秒它自己就装好了**（驱动 3.9.2024.9），
+别急着去下驱动。端口号会随插拔变，烧之前先扫一次：
+
+```powershell
+Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'COM\d+' } | Select-Object Name
 ```
 
 `main/secrets.h` 不进 git（见 `.gitignore`），第一次用照 `secrets.h.example` 填 Wi-Fi 和 MQTT 账号。

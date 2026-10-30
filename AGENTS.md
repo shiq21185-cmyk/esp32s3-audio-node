@@ -65,6 +65,23 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
                  powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -EA SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard build'"
               ⚠️ **还没在任何一块果云实物上通电验证**（用户机器上只扫到 COM1，没插板子）。
                  第一次上电先看串口 I2S 报错，再 `body_talk.py --text` 看上行 rms。
+            · ✅ **实物通了（2026-10-30 16:0x）**：插上后枚举成 **USB-SERIAL CH340 (COM4)**
+              （USB\VID_1A86&PID_7523）—— 这块面包板不是 d8 那种原生 USB 口，
+              第一次插 Windows 会先报 CM_PROB_FAILED_INSTALL，**等几秒自己装好**，
+              别急着装驱动；驱动版本 3.9.2024.9。
+              烧录 OK，启动日志：Wi-Fi TP-LINK_5D90 → IP **192.168.1.107**，
+              TLS 连上 EMQX，前缀 whale-8f2a5c31，TAG `e1`，
+              自检打印「麦克风 5/4/6，功放 15/16/7，16000 Hz」。
+              喇叭：`mqtt_audio.py --base whale-8f2a5c31 tone --seconds 1.5` → 25 包、
+              ddrop 0、(spkb-spks)/64 = **1680ms 真语音** ⇒ 功放那段通了（用户听感待确认）。
+              麦克风：`.tmp/e1_mic_check.py 8` → 8 秒 136 包（17/s = 60ms/包 ✓），
+              rms 中位 14、最大 1440、peak 18011 ⇒ INMP441 接线对（不是全 0）。
+              ⚠️ 工具坑：`mqtt_audio.py` 的 `--base` 是**顶层参数**，要写在子命令前面
+              （`mqtt_audio.py --base X tone`，写成 `tone --base X` 会 unrecognized）。
+              ⚠️ 直接 `body_mqtt.Link(base=...)` 会 `Bad user name or password` ——
+              账号密码在控制台配置里，必须用 `body_config.link_kwargs()` 再覆盖 base。
+            · 还没做：一整轮「你说话 → 她回话」的端到端（要用户在场说话），
+              以及控制台里把主题前缀切到 whale-8f2a5c31（现在默认还是 d8 那个）。
             · 公开仓库 esp32s3-audio-node 另有一份「通用版」（板型开关 BOARD_INTEGRATED /
               BOARD_BREADBOARD，commit 1ff1f79 已推），那是给外人看的版本，和这里互不干扰。
 
