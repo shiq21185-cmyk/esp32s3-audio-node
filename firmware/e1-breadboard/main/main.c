@@ -49,6 +49,8 @@
 #include "config.h"
 #include "codec.h"
 #include "secrets.h"
+#include "oled.h"
+#include "ui.h"
 
 static const char *TAG = "e1";
 
@@ -56,6 +58,9 @@ static const char *TAG = "e1";
 static EventGroupHandle_t s_net_ev;
 #define BIT_CONNECTED BIT0
 static int s_retry;
+/* 屏幕状态栏要"真的拿到 IP 了吗"，事件组只有 BIT_CONNECTED 且在别处会被读掉，
+ * 所以单独留一个只写的标志，纯粹给 UI 看。 */
+static volatile bool s_wifi_ok;
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -64,12 +69,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
         s_retry++;
+        s_wifi_ok = false;
         ESP_LOGW(TAG, "Wi-Fi 断开 (reason=%d)，第 %d 次重连…", d->reason, s_retry);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Wi-Fi 通了，本机 IP = " IPSTR, IP2STR(&e->ip_info.ip));
         s_retry = 0;
+        s_wifi_ok = true;
         xEventGroupSetBits(s_net_ev, BIT_CONNECTED);
     }
 }
@@ -176,6 +183,11 @@ static volatile uint32_t s_skip_echo;
 static bool spk_is_busy(void)
 {
     if (!s_echo_guard) return false;
+    /* s_spk 是 audio_init() 里才建的，而屏幕 UI 在 Wi-Fi 连上之前就起来了
+     * （那会儿还没有喇叭缓冲）。不判空的话，UI 第一次取快照就会撞
+     * "assert failed: xStreamBufferBytesAvailable (pxStreamBuffer)" 然后重启 ——
+     * 表现是板子一直在开机、屏幕闪一下就黑。 */
+    if (!s_spk) return false;
     if (xStreamBufferBytesAvailable(s_spk) > 0) return true;
     if (!s_spk_active_us) return false;
     return (esp_timer_get_time() - s_spk_active_us) < SPK_TAIL_US;
@@ -900,6 +912,34 @@ static void reporter_task(void *arg)
     }
 }
 
+/* 屏幕每 100ms 来取一次快照。这里只读、不加锁：
+ * 这些量要么是 bool / int 的单个字（32 位读写天然原子），
+ * 要么读到的稍旧一点也无所谓（差 100ms 的电平条看不出来）。 */
+static ui_status_t ui_snapshot(void)
+{
+    ui_status_t st = { 0 };
+    st.wifi_ok    = s_wifi_ok;
+    st.mqtt_ok    = s_connected;
+    st.mic_on     = s_mic_on;
+    st.gate_open  = s_gate_open;
+    st.btn_window = (s_mode == MODE_BTN) && (s_btn_talk_until_us > 0) &&
+                    (esp_timer_get_time() < s_btn_talk_until_us);
+    st.speaking   = spk_is_busy();
+    st.rms        = s_last_rms;
+    st.floor      = s_floor_noise;
+    st.mode       = s_mode;
+    st.up_pkts    = s_up_pkts;
+    st.down_pkts  = s_down_pkts;
+    if (s_wifi_ok) {
+        esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip = { 0 };
+        if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) {
+            snprintf(st.ip, sizeof(st.ip), IPSTR, IP2STR(&ip.ip));
+        }
+    }
+    return st;
+}
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -920,6 +960,13 @@ void app_main(void)
     snprintf(s_topic_cmd, sizeof(s_topic_cmd), "%s/cmd", s_base);
     snprintf(s_topic_state, sizeof(s_topic_state), "%s/state", s_base);
     ESP_LOGI(TAG, "主题前缀 = %s", s_base);
+
+    /* 屏幕先起来：下面 wifi_connect() 要阻塞十几秒，这段时间有张脸比黑屏好。
+     * 没接屏（探不到 0x3C）时 oled_init() 返回 false，UI 就不启动，
+     * 后面的音频/MQTT 完全不受影响 —— 屏幕是可选件。 */
+    if (oled_init()) {
+        ui_start(ui_snapshot);
+    }
 
     if (wifi_connect() != ESP_OK) return;
 
@@ -944,7 +991,7 @@ void app_main(void)
     cfg.credentials.client_id = s_client_id;
     /* 公共 broker 是匿名的：账号为空时**不能**把空串当用户名发出去，
      * 有些 broker 会当成"提供了错误的用户名"直接拒绝连接。 */
-    if (MQTT_USER[0] != '\\0') {
+    if (MQTT_USER[0] != '\0') {
         cfg.credentials.username = MQTT_USER;
         cfg.credentials.authentication.password = MQTT_PASS;
     }
