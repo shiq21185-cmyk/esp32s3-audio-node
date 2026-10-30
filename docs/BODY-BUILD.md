@@ -208,6 +208,54 @@ pin1  3.3V     （该座每针约 1A，只能走信号，不能给舵机供电�
 自动下载靠 Q2/Q3 两个 SS8050 + DTR/RTS 时序。万一进不去下载模式，
 因为 ESP32 模块是**排针装配**的，可以直接把模块的 **IO0 脚短接到 GND**，再按一次"重启"。
 
+#### 3.2.2 第二块板：果云版 42 引脚开发板 + 面包板（照小智 AI 教程接线）
+
+另一套硬件：**GOOUUU 果云版 ESP32-S3-DevKitC-1（42 引脚）+ 面包板**，
+接线照小智 AI 那份面包板教程的 2.2 节（[飞书文档](https://my.feishu.cn/wiki/EH6wwrgvNiU7aykr7HgclP09nCh)，
+注意看 2.2「GOOUUU 果云版 42 IO 引脚」和 2.3.2，别拿 2.1 的标准版 44 引脚那张图）。
+
+同一套固件两块板都能跑，**差别只在 `main/config.h` 的 `BOARD_PROFILE`**：
+
+```c
+#define BOARD_PROFILE   BOARD_WANGXUN   // 现有语音板（默认）
+#define BOARD_PROFILE   BOARD_GOOUUU    // 果云版面包板
+```
+
+| 功能 | wangxun 语音板 | 果云版面包板 | 说明 |
+|---|---|---|---|
+| INMP441 SCK (BCLK) | GPIO **4** | GPIO **5** | ⚠️ 和 WS 交叉 |
+| INMP441 WS | GPIO **5** | GPIO **4** | ⚠️ |
+| INMP441 SD (DIN) | GPIO 6 | GPIO 6 | 一致 |
+| MAX98357 BCLK | GPIO 16 | GPIO **15** | |
+| MAX98357 LRC (WS) | GPIO 17 | GPIO **16** | |
+| MAX98357 DIN | GPIO 15 | GPIO **7** | 教程里写的是 `G7_DIN` |
+| 送话按键 | IO1（板上自带） | GPIO **0**（板上 BOOT 键） | 果云板没别的按键，用 BOOT 最省事 |
+| OLED SDA / SCL | 12/11/…（SPI 屏） | **41 / 42**（I2C 屏） | 本固件不驱动屏幕 |
+
+面包板侧的接法（教程 2.2 节那两张图的意思）：
+
+```
+INMP441    SCK→GPIO5   WS→GPIO4   SD→GPIO6   VDD→3V3   GND→GND   L/R→GND
+MAX98357   BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7  VIN→5V    GND→GND   GAIN→GND
+           （BGA 封装那种小芯片不要接 GAIN；接了能正常出声就继续用）
+```
+
+几个会让人白折腾半天的点：
+
+1. **L/R 必须接 GND。** 悬空时数据可能落在右声道，而固件只取左声道 ⇒ 串口看着在收，
+   但推上去的是一整片静音。（wangxun 板就是 L/R 接地，实测右声道恒为 0。）
+2. **GAIN 接 GND = 9 dB 固定增益**；SD 悬空 = 常开。这两根决定了"有没有声音"，
+   和"声音大小"无关。
+3. **BCLK 和 WS 是交叉的**（4/5 ↔ 5/4）。接反不会声音小，是彻底没声，而串口日志一切正常。
+   别靠听：先 `tools/udp_record.py` / `body_talk.py --text` 看上行 rms 有没有东西。
+4. 果云开发板的 **3V3 / GND 排针不够分**（麦克风、功放、按键都要），
+   教程建议买几条 1 分 2 的分叉杜邦线（母线 3 条）——不然面包板那排要挤爆。
+5. BOOT 键（GPIO0）当送话键的副作用：**开机时按住会进下载模式**。
+   正常使用（上电之后再按）没影响；嫌碍事就把它换到任意空闲 GPIO，改 `PIN_BTN` 即可。
+6. 这块板是 **N16R8**（16MB Flash + 8MB OCT PSRAM），和现有语音板同款，
+   `sdkconfig` 不用动；如果你买到 N8R2，按教程把 PSRAM 改 QUAD、Flash 改 8MB、
+   分区表换 `partitions_8M.csv`。
+
 ### 3.3 接线总图
 
 ```
