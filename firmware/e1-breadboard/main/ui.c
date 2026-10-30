@@ -269,23 +269,35 @@ static void draw_mouth(ui_state_t s, int64_t t_ms)
             oled_pixel(x, y, on);
         }
     }
-    /* 张嘴 = 只比底图那颗小点(2x2)大一圈的 3x3，四角抹圆。
-     * 主人盯着实机比过：再大就不是"张嘴"而是"喊"，64px 宽的脸撑不住。 */
-    oled_fill(30, 45, 3, 3, false);
-    oled_pixel(30, 45, true); oled_pixel(32, 45, true);
+    /* 张嘴就是 2x2：底图本身已经是 3 个黑点（(31,45)(31,46)(32,46)），
+     * 补上 (32,45) 凑成方块 —— 整个"说话"只多一个像素。
+     * 主人试过 3x3/3x4/4x4，实机上都像在喊；64px 宽的脸撑不住更大的嘴。 */
+    oled_pixel(31, 45, false);
+    oled_pixel(32, 45, false);
+    oled_pixel(31, 46, false);
+    oled_pixel(32, 46, false);
     (void)t_ms;
 }
-/* 尾巴：绕裙子边上的 (47.5, 77) 转，±15°、2 秒一个来回。
+/* 尾巴：最先那版的晃动（绕 (47,72) 转 ±10°、1.6 秒一个来回），主人要的就是这个手感。
+ * 当时的问题是根部会甩离裙子露出黑缝 —— 现在根部的像素已经补进裙子里（见 sprite.h 的 STEM），
+ * 所以同一个晃法不会再脱开。
  *
  * 它是"从裙子后面钻出来"的，不是长在身上 —— 所以转轴放在裙子边缘而不是尾尖，
  * 位移才有"从裙子后面甩出来"的感觉，且根部几乎不动，不会飞出去。
  * 之前两版都不对：①绕尾尖转 ⇒ 根部被甩离身体露黑缝；②剪切式 ⇒ 整条尾巴上下平移，
  * 看着像在飘，不像在摆。
  */
+#define TAIL_WAG 0      /* 0 = 尾巴不动（主人：先别动，以后再改）；1 = 晃 */
+
 static void draw_tail(int64_t t_ms)
 {
-    double ph = (double)(t_ms % 2000) / 2000.0 * 6.2831853;
-    double ang = 15.0 * sin(ph) * 3.14159265358979 / 180.0;
+#if !TAIL_WAG
+    (void)t_ms;
+    double ang = 0.0;
+#else
+    double ph = (double)(t_ms % 1600) / 1600.0 * 6.2831853;
+    double ang = 10.0 * sin(ph) * 3.14159265358979 / 180.0;
+#endif
     double sa = sin(ang), ca = cos(ang);
     const double px = TAIL_PIVOT_X, py = TAIL_PIVOT_Y;
 

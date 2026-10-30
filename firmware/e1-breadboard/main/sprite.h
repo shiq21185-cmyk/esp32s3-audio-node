@@ -138,8 +138,8 @@ static const uint8_t k_body[128][8] = {
 #define TAIL_Y0 64
 #define TAIL_W 16
 #define TAIL_H 16
-#define TAIL_PIVOT_X 47.5
-#define TAIL_PIVOT_Y 77.5
+#define TAIL_PIVOT_X 47.0
+#define TAIL_PIVOT_Y 72.0
 static const uint8_t k_tail[TAIL_H][(TAIL_W + 7) / 8] = {
     {0x08,0x00},  /* y=64 */
     {0x1c,0x00},  /* y=65 */
