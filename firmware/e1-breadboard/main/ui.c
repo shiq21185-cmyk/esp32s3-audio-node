@@ -90,6 +90,7 @@ static int level_pct(int rms, int floor)
 /* 实心椭圆（整数判据，不引浮点）。on=false = 挖黑（画眼窝/嘴）。
  * 一开始画的是空心方框，1:1 摆在屏上像两块"眼镜片"，不像脸；
  * 换成实心 + 挖黑瞳孔之后才像一张脸。 */
+#if !PORTRAIT
 static void ellipse_fill(int cx, int cy, int rx, int ry, bool on)
 {
     for (int dy = -ry; dy <= ry; dy++) {
@@ -101,7 +102,6 @@ static void ellipse_fill(int cx, int cy, int rx, int ry, bool on)
     }
 }
 
-#if !PORTRAIT
 static void fill_ellipse(int cx, int cy, int rx, int ry)
 {
     ellipse_fill(cx, cy, rx, ry, true);
@@ -123,6 +123,7 @@ static void thick_line(int x0, int y0, int x1, int y1, int w)
 #endif
 
 /* ================= 顶部状态栏 ================= */
+#if !PORTRAIT
 static void draw_wifi(int x, int y, bool on)
 {
     /* 4 根柱子，从 2px 高长到 8px 高；没连上就打一个叉 */
@@ -140,6 +141,9 @@ static void draw_wifi(int x, int y, bool on)
     }
 }
 
+#endif /* !PORTRAIT */
+
+#if !PORTRAIT
 static void draw_status(const ui_status_t *st, ui_state_t s)
 {
     oled_fill(0, 0, OLED_W, 9, true);          /* 实心白条，字反色 */
@@ -161,19 +165,12 @@ static void draw_status(const ui_status_t *st, ui_state_t s)
         oled_vline(34, 5, 2);
     }
 
-#if PORTRAIT
-    /* 竖屏只有 64 px 宽，塞不下 IP —— 右边给一个状态字母，
-     * 掉线和待机在黑白屏上都是"静止的小人"，有个字母就不用猜。 */
-    static const char code[] = { 'O', 'I', 'L', 'S' };
-    char one[2] = { code[s], 0 };
-    oled_text(OLED_W - 7, 1, one, 1, true);
-#else
     /* 右：IP（连上才有；没连上写 no net） */
     const char *right = st->wifi_ok ? (st->ip[0] ? st->ip : "no ip") : "no net";
     int w = oled_text_w(right, 1);
     oled_text(OLED_W - 2 - w, 1, right, 1, true);
-#endif
 }
+#endif /* !PORTRAIT */
 
 /* ================= 脸（横屏版） ================= */
 #if !PORTRAIT
@@ -243,7 +240,7 @@ static void draw_face_landscape(const ui_status_t *st, ui_state_t s, bool blink,
 static void draw_sprite(void)
 {
     for (int y = 0; y < OLED_H; y++) {
-        const uint8_t *row = k_sprite[y];
+        const uint8_t *row = k_body[y];
         for (int b = 0; b < OLED_W / 8; b++) {
             uint8_t v = row[b];
             if (!v) continue;
@@ -268,13 +265,34 @@ static void draw_mouth(ui_state_t s, int64_t t_ms)
     /* 先把窗口恢复成底图（否则黑嘴会一层层叠上去越张越大） */
     for (int y = MOUTH_Y0; y <= MOUTH_Y1; y++) {
         for (int x = MOUTH_X0; x <= MOUTH_X1; x++) {
-            bool on = (k_sprite[y][x >> 3] >> (x & 7)) & 1;
+            bool on = (k_body[y][x >> 3] >> (x & 7)) & 1;
             oled_pixel(x, y, on);
         }
     }
-    double ph = (double)(t_ms % 220) / 220.0 * 6.2831853;
-    int ry = 1 + (int)(2.2 * fabs(sin(ph)));     /* 1..3 */
-    ellipse_fill(31, 45, 1 + ry / 2, ry, false);
+    /* 张嘴 = 只比底图那颗小点(2x2)大一圈的 3x3，四角抹圆。
+     * 主人盯着实机比过：再大就不是"张嘴"而是"喊"，64px 宽的脸撑不住。 */
+    oled_fill(30, 45, 3, 3, false);
+    oled_pixel(30, 45, true); oled_pixel(32, 45, true);
+    (void)t_ms;
+}
+/* 尾巴：**剪切式**摆动（不是绕轴旋转）。
+ * 旋转那一版实机上尾巴根部会离开身体，露出一条黑缝。
+ * 现在让位移随 tx 线性增长：根部 tx=0 永远不动，只有鳍尖上下走 ±3.5px，
+ * 所以永远不会脱开；一个来回 2 秒。 */
+static void draw_tail(int64_t t_ms)
+{
+    double ph = (double)(t_ms % 2000) / 2000.0 * 6.2831853;
+    double amp = 3.5 * sin(ph);
+    for (int ty = 0; ty < TAIL_H; ty++) {
+        for (int tx = 0; tx < TAIL_W; tx++) {
+            if (!((k_tail[ty][tx >> 3] >> (tx & 7)) & 1)) continue;
+            int dy = (int)(amp * (double)tx / (double)(TAIL_W - 1)
+                           + (amp >= 0 ? 0.5 : -0.5));
+            int x = TAIL_X0 + tx, y = TAIL_Y0 + ty + dy;
+            if (x < 0 || x >= OLED_W || y < 0 || y >= OLED_H) continue;
+            oled_pixel(x, y, true);
+        }
+    }
 }
 #endif /* PORTRAIT */
 
@@ -361,9 +379,12 @@ static void ui_task(void *arg)
         ui_state_t s = pick_state(&st);
 
         oled_clear();
+#if !PORTRAIT
         draw_status(&st, s);
+#endif
 #if PORTRAIT
         draw_sprite();
+        draw_tail(t_ms);
         draw_mouth(s, t_ms);
 #else
         draw_face_landscape(&st, s, blink, t_ms);
