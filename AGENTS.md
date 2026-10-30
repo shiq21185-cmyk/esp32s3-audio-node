@@ -63,8 +63,6 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               ⚠️ 编译必须 powershell + **先删 MSYSTEM**（系统级 MSYSTEM=UCRT64，IDF 的 MSYS 卫兵
                  会直接拒掉、**还 exit 0 什么都不编**）：
                  powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -EA SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard build'"
-              ⚠️ **还没在任何一块果云实物上通电验证**（用户机器上只扫到 COM1，没插板子）。
-                 第一次上电先看串口 I2S 报错，再 `body_talk.py --text` 看上行 rms。
             · ✅ **实物通了（2026-10-30 16:0x）**：插上后枚举成 **USB-SERIAL CH340 (COM4)**
               （USB\VID_1A86&PID_7523）—— 这块面包板不是 d8 那种原生 USB 口，
               第一次插 Windows 会先报 CM_PROB_FAILED_INSTALL，**等几秒自己装好**，
@@ -98,8 +96,10 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               板子侧写 I2S 4020ms（其中 2400ms 是垫底静音）、溢出 0、残留 buff 2280ms；
               首音 969ms、念完 4115ms、本轮 7488ms。
               ⇒ 第三套（果云面包板）的耳朵、嘴、MQTT、TTS、她的大脑，全链路成立。
-            · 还没做：一整轮「你说话 → 她回话」的端到端（要用户在场说话），
-              以及控制台里把主题前缀切到 whale-8f2a5c31（现在默认还是 d8 那个）。
+            · 还没做：① 控制台「身体·连接」的主题前缀还是 d8 那个（whale-1bb62897），
+              要跟 e1 说话得手动切，或者定一块板当默认；② QQ→板子的 `body_say`
+              还没在 e1 上验过（d8 上验过）；③ e1 的喇叭听感（会不会发闷/发卡）
+              数据上没毛病，还没让他逐句确认。
             · 公开仓库 esp32s3-audio-node 另有一份「通用版」（板型开关 BOARD_INTEGRATED /
               BOARD_BREADBOARD，commit 1ff1f79 已推），那是给外人看的版本，和这里互不干扰。
 
