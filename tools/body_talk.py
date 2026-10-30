@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import body_config   # noqa: E402  （控制台那份可调参数，见 tools/body_config.py）
 import body_mqtt     # noqa: E402  （公网中转那条链路，见 tools/body_mqtt.py）
+import body_opus     # noqa: E402  （上行一帧多长，见 tools/body_opus.py）
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -51,7 +52,11 @@ VENV_PY = ASR_DIR / ".venv" / "Scripts" / "python.exe"
 WORKER = ASR_DIR / "worker.py"
 
 SAMPLE_RATE = body_mqtt.SAMPLE_RATE
-PKT_S = body_mqtt.CHUNK_MS / 1000.0     # 一包音频有多长（0.06 秒）
+# ⚠️ 这里量的是**上行**：link.recv() 交出来的是「解码后的一帧」，一帧
+# FRAME_MS=60ms（见 body_opus.py）。别拿 body_mqtt.CHUNK_MS —— 那是
+# **下行**发一包的长度，10-28 改成 120ms 之后两者就不再相等了，
+# 用它会把所有"多少包算 0.5 秒有声"的阈值算小一半。
+PKT_S = body_opus.FRAME_MS / 1000.0   # 一包音频有多长（0.06 秒）
 
 
 def log(msg):
@@ -63,7 +68,7 @@ def ms(t0):
 
 
 # ---------------------------------------------------------------- 录音
-def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
+def record(link, *, max_s=25.0, silence_s=2.0,
            wav_out=None, wait_s=4.0, cue=False):
     """从板子录一段话，再**离线**判断这段里到底有没有人说话。
 
@@ -89,7 +94,13 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
     link.drain()                       # 上一轮她说话时可能还积着包，扔掉
     log("🎧 在听了 —— 你说话吧" + ("（听到\"叮\"就可以说了）" if cue else ""))
 
-    warm_end = time.time() + 0.3      # 刚开麦时 I2S DMA 还没填上，整片 ±32768
+    # 刚开麦时 I2S 有时会吐一整片 ±32768（DMA 还没填上）。
+    # 早先的写法是「开麦后 0.3 秒整段不收」—— 问题是真人听到"叮"马上开口，
+    # 头几个字就正好落在这 0.3 秒里被吞掉（2026-10-28 巡检发现）。
+    # 现在改成只看包本身：`extreme > 0.95`（几乎每颗样本都贴着满量程）才丢，
+    # 那是 DMA 垃圾的独有特征，真人声再响也是参差的。
+    # 实测（GATE 0 关掉人声门限、屋里安静）28 包全是 peak 12~40、extreme 0.000，
+    # 没有一片垃圾 —— 说明按包判就够了，不需要按时间一刀切。
     frames, peaks = [], []
     t0 = time.time()
     last_pkt = t0          # 上一个包到的时刻：板子掉线/卡顿时靠它止损
@@ -99,9 +110,12 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
     live_run = 0
     voiced_n = 0
 
-    # 一包 60ms，所以"连续 120ms 有声"= 2 包；"攒够 0.5 秒有声"= 9 包。
-    OPEN_RUN = 2
-    MIN_VOICED = 9
+    # 上游一包 60ms（body_opus.FRAME_MS），"攒够 0.5 秒有声"= 8 包。
+    # OPEN_RUN 曾经是 2（要连续两包才算开口），但配合过高的门槛会变成：
+    # 一句话里几乎没有"连续两包都过门槛"，于是 t_voice 一直不开 → 永远在等。
+    # 门限已经在固件里做过一次，这里一包就算开口。
+    OPEN_RUN = 1
+    MIN_VOICED = max(4, int(round(0.5 / PKT_S)))
 
     # 板子空闲时 30 秒才发一条 state（省流量），所以"安静"和"掉线"在数据流上
     # 长得一模一样。每隔 15 秒主动敲一次 PING，两次不回才算掉线 ——
@@ -110,22 +124,66 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
     last_probe = t0
     offline_hits = 0
 
+    # 断流阈值：必须**远大于**板子的人声门限挂留（GATE_HANG_MS = 1.2 秒）。
+    # 门限一关板子就停止发包，"安静"和"掉线"在数据流上长得一样 ——
+    # 所以只有真的一句完整的话（voiced_n >= MIN_VOICED）之后还断流这么久，
+    # 才算链路出问题。
+    STALL_S = 6.0
+    # 假开头的清理线：桌面响一下、椅子嘎一声也能顶起 t_voice，
+    # 有声量不够就当作没开口，清空重等。
+    RESET_QUIET = max(silence_s + 1.0, 3.0)
+
+    def judge(now):
+        """返回 (原因, 动作)；动作 in ('stop', 'reset', None)。
+
+        为什么抽成函数：**收工判断必须在"没收到包"的分支里也跑**。
+        旧代码把静音判断写在收到包之后，可你说完停嘴时板子正好不发包，
+        于是那条路永远走不到，只剩一条写死的 1.5 秒"掉线"判断在生效 ——
+        症状就是话被从中间截断，或者明明没人说话却报掉线。
+        """
+        nonlocal t_voice, last_voice, voiced_n, live_run
+        if t_voice is not None and (now - t_voice) > max_s:
+            return f"到 {max_s:.0f} 秒上限（可能你还没说完）", "stop"
+        if last_voice:
+            quiet = now - last_voice
+            if quiet > silence_s and voiced_n >= MIN_VOICED:
+                return f"静音 {quiet:.1f} 秒", "stop"
+            if quiet > RESET_QUIET and voiced_n < MIN_VOICED:
+                return None, "reset"
+        if (t_voice is not None and voiced_n >= MIN_VOICED
+                and (now - last_pkt) > STALL_S):
+            return f"断流 {now - last_pkt:.1f} 秒（板子没再发包，可能掉线）", "stop"
+        return None, None
+
     try:
         while True:
             pkt = link.recv(0.3)
+            now = time.time()
+
             if pkt is None:
-                if t_voice is None and (time.time() - t0) > wait_s:
+                reason, action = judge(now)
+                if action == "stop":
+                    end_why = reason
+                    break
+                if action == "reset":
+                    # ⚠️ 绝不能 frames.clear() —— 那是把已经录到的人声扔掉。
+                    # 2026-10-28 就栽在这：门槛一旦偏高，每 3 秒 reset 一次，
+                    # 每次把前面积攒的音频清空，最后只剩最后 1 秒多交给 ASR，
+                    # 用户听起来就是"话没说完就被截断了"。
+                    # reset 只该重置"判断状态"，音频一律留着。
+                    t_voice = None
+                    last_voice = None
+                    voiced_n = 0
+                    live_run = 0
+                    last_pkt = now
+                    continue
+                if t_voice is None and (now - t0) > wait_s:
                     log(f"   ……{wait_s:.0f} 秒没听到动静，先停")
                     break
-                # 已经开口了却 1.5 秒收不到包 ⇒ 板子掉线或链路断了。
-                # 不设这条的话会一直挂着等（测试里踩过）。
-                if t_voice is not None and (time.time() - last_pkt) > 1.5:
-                    end_why = "板子 1.5 秒没再发包（掉线/卡顿）"
-                    break
-                # 还没开口，只是没包 —— 可能是屋里本来就安静，也可能板子没了。
+                # 只是没包 —— 可能屋里本来就安静，也可能板子没了。
                 # 敲一下 PING：能立刻回一条 state 就是活着。
-                if t_voice is None and (time.time() - last_probe) > PROBE_EVERY:
-                    last_probe = time.time()
+                if (now - last_probe) > PROBE_EVERY:
+                    last_probe = now
                     if link.alive(3.0):
                         offline_hits = 0
                     else:
@@ -135,7 +193,8 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
                             end_why = "板子不在线（PING 两次没回应）"
                             break
                 continue
-            last_pkt = time.time()
+
+            last_pkt = now
             if not pkt:
                 continue
 
@@ -143,58 +202,53 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
             # 全是 ±32768 ⇒ DMA 没填上的垃圾，不是声音。
             # 真人声就算很响也是参差的（有从 300 到 30000 的各种值），
             # 只有硬件毛刺才是"每一颗都贴着满量程"。
-            if time.time() < warm_end or extreme > 0.95:
+            if extreme > 0.95:
                 continue
             frames.append(pkt)
             peaks.append(peak)
 
-            now = time.time()
-            if len(peaks) >= 15:
+            # ⚠️ 在线门槛的坑（2026-10-28 血泪）：
+            # 固件的人声门限已经把静音挡在外面了 —— 到这里的 peaks 里**全是说话**，
+            # 一点底噪都没有。拿这堆数字算"第 20 百分位当底噪、再乘 4"，
+            # 等于拿"人声自己"当底噪、再要求比它响 4 倍：
+            #   实测一段 21 包的真话，20 百分位 = 147 → 门槛被顶到 588，
+            #   而这段话的峰值只有 80~623，结果**只有 2 包能过**。
+            # 于是 voiced_n 永远凑不够、last_voice 永远不更新（静音判断失效），
+            # RESET_QUIET 一到就 reset 把已经录到的 frames 全清掉 ——
+            # 用户听到的就是"我还没说完，录音就结束了"，而且结尾总是只剩一小段。
+            # 正确做法：门槛只用来挡"真的什么都没有"，绝对压低。
+            if len(peaks) >= 12:
                 ordered = sorted(peaks)
                 base = max(ordered[int(len(ordered) * 0.20)], 20)
             else:
                 base = 40
-            # 门槛跟着实测底噪走：这屋底噪 40 → 门槛 300（离底噪 7 倍，不会误触发）；
-            # 换个吵的地方底噪 300 → 门槛 1200，自动跟着抬。
-            thr_live = max(300.0, base * 4.0)
+            thr_live = max(120.0, base * 1.5)
             if peak > thr_live:
                 live_run += 1
                 voiced_n += 1
                 if live_run >= OPEN_RUN:
                     if t_voice is None:
                         t_voice = now
-                    # last_voice 只认"连续 120ms 的有声段"，零星的几包噪声不让它续命 ——
+                    # last_voice 只认"连续两包有声"，零星的几包噪声不让它续命 ——
                     # 否则你说完一句话，桌面轻响一下又把收尾计时器刷新一次。
                     last_voice = now
             else:
                 live_run = 0
 
-            if t_voice is not None and (now - t_voice) > max_s:
-                end_why = f"到 {max_s:.0f} 秒上限（可能你还没说完）"
+            reason, action = judge(time.time())
+            if action == "stop":
+                end_why = reason
                 break
-            if t_voice is None and (now - t0) > wait_s:
+            if action == "reset":
+                # 同上：只重置判断状态，已录到的音频一个字都不许丢。
+                t_voice = None
+                last_voice = None
+                voiced_n = 0
+                live_run = 0
+                continue
+            if t_voice is None and (time.time() - t0) > wait_s:
                 log(f"   ……{wait_s:.0f} 秒没听到动静，先停")
                 break
-            if last_voice:
-                quiet = now - last_voice
-                # 攒够 0.5 秒有声才认"这句说完了"；只有一两个字就静下来，说明你还在想。
-                if quiet > silence_s and voiced_n >= MIN_VOICED:
-                    end_why = f"静音 {silence_s:.1f} 秒"
-                    break
-                # 兜底：卡在 3 秒静音必收工，免得一直等下去。
-                # 但它只对**真的说了话**的轮次生效：桌面响一下、椅子嘎一声
-                # 也能把 t_voice 顶起来，旧逻辑就直接收工，看着像"她没理我"。
-                # 有声时长不够就当作假开头，清空重等。
-                if quiet > max(silence_s + 1.0, 3.0):
-                    if voiced_n >= MIN_VOICED:
-                        end_why = f"静音 {quiet:.1f} 秒（超过兜底）"
-                        break
-                    t_voice = None
-                    last_voice = None
-                    voiced_n = 0
-                    live_run = 0
-                    frames = []
-                    peaks = []
     finally:
         link.mic(False)     # 一定要关：不关就一直往公网推屋里声音
 
@@ -206,9 +260,12 @@ def record(link, *, max_s=25.0, silence_s=2.0, min_s=0.4,
         return None, 0.0
 
     # ---------------- 离线判定 ----------------
+    # 同样理由（见上面在线门槛那段注释）：peaks 里全是说话、没有静音，
+    # 用它算"底噪"再乘 4，就是把真话判成"没人说话"。
+    # 这里只需要回答"这段里到底有没有信号"，门槛压到最低。
     ordered = sorted(peaks)
-    floor = max(ordered[int(len(ordered) * 0.20)], 40)      # 第 20 百分位当底噪
-    thr = max(300.0, floor * 4.0)
+    floor = max(ordered[int(len(ordered) * 0.20)], 40)
+    thr = max(120.0, floor * 1.5)
     hot = [k for k, p in enumerate(peaks) if p > thr]
     clip_max = max(peaks)
 
@@ -305,16 +362,66 @@ class Asr:
 
 
 # ---------------------------------------------------------------- 她的脑子
-def ask_her(text, *, new=False, with_time=True):
+def reset_her_session():
+    """把「她跟主人那条会话」的上下文清掉（她会失忆，但记忆条目留着）。
+
+    走桥接的 POST /api/session/reset —— 这是控制台上「清上下文」按钮用的同一个
+    端点：删掉 key→sessionId 映射、归档旧会话，重新开口时 ensureSession()
+    会新建一个。话题/想法/印象/约定这些 socialV2 记忆是**保留**的
+    （2026-10-23 主人定的口径：清上下文不删记忆）。
+
+    ⚠️ 这条以前是 `--new` 参数，但根本没接上任何东西 —— 传了也照样是原来那段
+    会话，帮助文本却写着「她会失忆」。2026-10-28 巡检发现，接上了。
+    """
+    import urllib.request
+    import urllib.error
+
+    tok = BRIDGE / "state" / "console-token"
+    token = tok.read_text(encoding="utf-8").strip() if tok.exists() else ""
+    cfgf = BRIDGE / "config.json"
+    key = ""
+    try:
+        key = str((json.loads(cfgf.read_text(encoding="utf-8")).get("call") or {})
+                  .get("answerKey") or "")
+    except Exception:
+        key = ""
+    if not key:
+        raise RuntimeError("config.json 里没有 call.answerKey，不知道该清哪条会话")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{BRIDGE_PORT}/api/session/reset",
+        data=json.dumps({"key": key}).encode("utf-8"),
+        headers={"content-type": "application/json", "x-console-token": token},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(f"清会话失败 HTTP {exc.code}：{body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"连不上桥接（127.0.0.1:{BRIDGE_PORT}）：{exc}") from exc
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error") or "桥接没清成功")
+    return key, data.get("archived") or ""
+
+
+def ask_her(text, new=False):
     """把她的话送进**她跟主人 QQ 私聊那一条会话**，只取这一轮的回复文本。
 
     走桥接的 /api/body/turn：
       · 同一个 session —— 板子上说话的她和 QQ 里打字的是同一个人、同一段记忆；
       · 桥接会给这一轮挂"静默名额"，所以回复不会跑进 QQ 聊天窗；
       · 上下文由桥接拼（屋里模式 + 当前时间），这里不要再自己加时间前缀。
+    new=True 时先清掉那条会话的上下文（= 她会失忆，记忆条目保留）。
     返回她的回复；失败抛 RuntimeError。
     """
     import urllib.request
+
+    if new:
+        key, archived = reset_her_session()
+        log(f"🧹 已清空会话上下文（{key}，旧会话 {archived or '无'} 已归档）—— 她这轮会失忆")
+        time.sleep(0.3)      # 让桥接把状态落盘，紧接着开口才不会撞上旧会话
 
     tok = BRIDGE / "state" / "console-token"
     token = tok.read_text(encoding="utf-8").strip() if tok.exists() else ""
@@ -413,6 +520,15 @@ def speak(text, link, volume=1.0):
     #   换来全程不受网络抖动与合成速度影响 —— 这是"带出门用"必须付出的。
     from tts_to_board import speak_streaming, DEFAULT_VOICE
     text = shorten(text)
+    # 下行编码每句话重新读一次控制台配置 —— 这样在网页上切 PCM/Opus
+    # **不用重启这个窗口**，下一句就生效（出问题也能立刻切回来）。
+    try:
+        want = str(body_config.load(fresh=True).get("downCodec", "pcm")).lower()
+        if want != getattr(link, "down_codec", "pcm"):
+            link.down_codec = "opus" if want == "opus" else "pcm"
+            log(f"   🔉 下行编码已切成 {link.down_codec.upper()}")
+    except Exception:
+        pass
     # 句首敲一次 PING 留基线，句尾再敲一次，用板子自报的计数器做体检
     s0 = link.snapshot() if hasattr(link, "snapshot") else {}
     try:
@@ -443,8 +559,7 @@ def speak(text, link, volume=1.0):
                                #   ⇒ 根因是"送料 vs 播放"对不齐，句尾必然见底。
                                # 所以放弃边合成边送，改成整句做齐再匀速推。
                                # 代价：开口前多等 1~2 秒；换来一句到底不断。
-                               full_prebuf=True,
-                               full_prebuf_s=3.0)
+                               full_prebuf=True)
     finally:
         # 最后不足一帧的零头必须挤出来，否则每句话结尾会吞掉几十毫秒
         # （听感上是句尾"咔"一下截断）。只在 Opus 通路上有意义。
@@ -458,14 +573,25 @@ def speak(text, link, volume=1.0):
         try:
             s1 = link.snapshot() if hasattr(link, "snapshot") else {}
             if s0 and s1 and "spkb" in s1:
-                played = (s1["spkb"] - s0.get("spkb", 0)) / 64.0   # 立体声 16bit：64B = 1ms
+                # ⚠️ 两个量纲别混：
+                #   spkb/spks —— 固件写 I2S 的字节数，I2S 是**立体声** 16bit
+                #                ⇒ 64 字节 = 1ms；
+                #   sbuf       —— 喇叭 StreamBuffer 里的字节数，那是**单声道**
+                #                ⇒ 32 字节 = 1ms。
+                # 2026-10-28 之前这里还留着一个算完没人用的 idle，已删。
+                played = (s1["spkb"] - s0.get("spkb", 0)) / 64.0
                 sil = (s1.get("spks", 0) - s0.get("spks", 0)) / 64.0
                 drop = s1.get("ddrop", 0) - s0.get("ddrop", 0)
-                idle = sil - max(0.0, played - 0)  # 占位，保留语义
-                log(f"   🩺 板子侧：窗口内写 I2S {played:.0f}ms，静音 {sil:.0f}ms"
-                    f" ｜ 溢出丢帧 {drop} ｜ 残留 buff {s1.get('sbuf', 0)/32:.0f}ms")
-                if drop > 0:
-                    log("   ⚠️ 有溢出丢帧 —— 送太快或垫底太多，会断字")
+                if played <= 0 and sil <= 0:
+                    # snapshot() 超时会拿"上一条 state"兜底，两个差值都是 0。
+                    # 这时候把 0ms 当"板子没出声"读就完全错了 —— 是没拿到新数据。
+                    log("   🩺 板子侧：这轮没拿到新心跳（PING 没回），"
+                        "体检数字不可信 —— 不影响这一句的播放")
+                else:
+                    log(f"   🩺 板子侧：窗口内写 I2S {played:.0f}ms，静音 {sil:.0f}ms"
+                        f" ｜ 溢出丢帧 {drop} ｜ 残留 buff {s1.get('sbuf', 0)/32:.0f}ms")
+                    if drop > 0:
+                        log("   ⚠️ 有溢出丢帧 —— 送太快或垫底太多，会断字")
         except Exception:
             pass
 
@@ -512,6 +638,8 @@ def main():
     kw["broker"] = args.broker
     log(f"📡 连 broker {args.broker}:{kw['port']}"
         f"{' (TLS)' if kw['use_tls'] else ''}，前缀 {args.base} …")
+    log(f"   🔉 下行编码 {kw['down_codec'].upper()}"
+        f"（{'约 2KB/s，板子现场解码' if kw['down_codec'] == 'opus' else '32KB/s，板子只搬运'}）")
     try:
         link = body_mqtt.Link(**kw).connect()
     except RuntimeError as exc:

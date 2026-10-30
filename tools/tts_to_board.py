@@ -162,7 +162,7 @@ def _apply_gain(chunk, gain):
 def speak_streaming(text, ip=None, port=UDP_PORT, voice=DEFAULT_VOICE, timeout_s=30.0,
                     gain=1.0, sink=None, channels=2, chunk_bytes=None, chunk_ms=None,
                     prebuf_ms=800, lead_ms=0, level=None, health=None,
-                    full_prebuf=False, full_prebuf_s=6.0):
+                    full_prebuf=False):
     """边合成边送：先攒够 prebuf_ms 再开口，之后严格匀速。
 
     gain：播放增益（1.0=原始，0~1.5）。板子上没有硬件音量 —— MAX98357 的
@@ -207,7 +207,9 @@ def speak_streaming(text, ip=None, port=UDP_PORT, voice=DEFAULT_VOICE, timeout_s
       句尾必然把缓冲吃空**，而不是网络、不是编码、不是 I2S。
       所以干脆放弃"边合成边送"：先把整段料做齐（几秒），再一口气匀速推。
       代价：开口前多等 1~3 秒；换来全程缓冲满、一句到底不断。
-      full_prebuf_s 是等料的封顶时间，超了就先开口（长句不至于等太久）。
+      ⚠️ 早先这里还有个 `full_prebuf_s`（等料封顶时间），但代码里从未真正用它
+        —— 2026-10-28 巡检发现是死参数，已删。真要限时就该在攒料循环里判，
+        不是只在签名里挂个名字。
     """
     import edge_tts
 

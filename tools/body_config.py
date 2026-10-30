@@ -47,6 +47,13 @@ DEFAULTS = {
     #   gate = 室内，本地人声门限，有人说话才上传
     #   btn  = 随身，只有按键才上传（外面吵的时候门限不可靠，交给手指）
     "boardMode": "gate",
+    # 下行音频编码（电脑 → 板子喇叭）：
+    #   pcm  = 裸 PCM，32KB/s，板子只搬运不解码。最省板子 CPU，2026-10-28 用它
+    #          才做到「完全通顺」。
+    #   opus = Opus 16kbps，约 2KB/s，板子现场解码。省 16 倍流量，但板子解码
+    #          跟不上时会「前面正常后面一卡一卡」—— 所以做成开关，出问题就切回 pcm。
+    # ⚠️ 上行一直是 Opus（0xAC 三帧打包），不受这个值影响。
+    "downCodec": "pcm",
 }
 
 _cache = {"path": None, "mtime": 0.0, "data": None}
@@ -85,6 +92,7 @@ def _coerce(raw):
     out["maxSec"] = min(max(out["maxSec"], 3.0), 120.0)
     out["waitSec"] = min(max(out["waitSec"], 5.0), 600.0)
     out["boardMode"] = "btn" if str(out.get("boardMode", "gate")).strip().lower() == "btn" else "gate"
+    out["downCodec"] = "opus" if str(out.get("downCodec", "pcm")).strip().lower() == "opus" else "pcm"
     return out
 
 
@@ -154,6 +162,8 @@ def link_kwargs(fresh=True):
         "broker": cfg["broker"],
         "port": int(cfg["brokerPort"]),
         "use_tls": bool(cfg["brokerTls"]),
+        # 下行编码跟着配置走。探活/切模式不发音频，多传这个参数无害。
+        "down_codec": cfg["downCodec"],
     }
     if user:
         kw["user"] = user

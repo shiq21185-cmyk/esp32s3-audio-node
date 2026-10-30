@@ -78,7 +78,6 @@ def main():
             time.sleep(0.05)
         print(f"切换失败：板子还是 mode={link.state.get('mode')}")
         return 1
-        return 0
     finally:
         link.close()
 

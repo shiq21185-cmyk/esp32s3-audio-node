@@ -3,7 +3,8 @@
 
 以前探活是往板子发 UDP PING。声音搬上 MQTT 之后板子不在同一个网里了，
 UDP 这条路整个不通，改成"看 broker 上有没有它的心跳"：
-板子每 5 秒往 <base>/state 发一条 JSON，收到就算在线。
+板子平时每 30 秒往 <base>/state 发一条心跳 JSON（状态一变就立刻补一条），
+所以这里连上后先发一个 PING 催它立刻回一条，不用干等 30 秒。
 
 用法：
     python body_probe.py [--base whale-a90c6c] [--broker broker.hivemq.com] [--timeout 8]

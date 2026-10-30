@@ -190,24 +190,15 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
                 注意：假板子必须推 **16k 立体声**（1280 字节 = 20ms）。把 mono 直接丢过去
                   会按一半速度播，整组测试结论都是错的（第一次就翻在这儿）。
                 文档：BODY-BUILD §11 加两行（截断 / 说完不接话）+ 两个旋钮的改法。
-            ✅ 2026-10-26 21:00 身体参数搬进控制台网页（用户原话：「可以设置的东西
-               加入我自己的控制台去，比如音量」）
-               位置：http://127.0.0.1:3100/ → 侧边栏「身体」（ESP32 徽标）→ 三张卡。
-                 · 连接：板子 IP + 「测试连接」（UDP PING，板子在 800ms 内回 PONG 算在线）
-                 · 声音：音量滑杆 0~150%（存的是增益倍数 0~1.5）、开始收录前的"叮"
-                 · 听你说话：沉默多久算说完 / 单句最多录 / 等你开口最多
-               后端：bridge.js 新增 `GET/POST /api/body/config` 与 `GET /api/body/status`，
-                 就贴在 `/api/body/turn` 后面；写 `state/body-config.json`（原子写）。
-               前端：console.html 加导航项 + consolePages 一条 + 三个 section + loader/save。
+            ✅ 2026-10-26 21:00 身体参数搬进控制台网页（后来这一页一直在长大，
+               现有「连接/声音/工作模式/下行编码/提示音」等卡，字段以
+               `state/body-config.json` 为准）
                跨进程契约：这份 json 同时被 rot/tools/body_talk.py 通过 tools/body_config.py
                  读取，**每轮现读** ⇒ 保存后下一轮对话立刻生效，不用重启桥接、不用重开黑窗口。
-                 字段名/单位两边必须一一对应（volume 是倍数不是百分比，界面负责 85↔0.85 换算）。
                改完 console.html 刷新浏览器即可（桥接每次请求都 readFileSync 它），
                  但改了 bridge.js 必须 `POST /api/restart`。
                踩坑：每个 `section[data-page]` **必须**有 `<h2>`，否则建搜索索引时抛 TypeError，
                  整段脚本后半不发（症状：所有卡片一起显示、点导航没反应）。
-               实测：GET/POST 接口通、python 侧读到同一份值、页面能渲染出三张身体卡。
-                 板子当时未通电（PING 不回），所以"在线"这条路要等用户插上板子再验一次。
             PC 侧：mcp-body.js 仍未写（"接入"已靠桥接端点实现，但那还是被动喂话，不是她的工具）。
 2026-10-27  ✅ D7 公网中转打通（firmware/d7-mqtt）
             用户目标定死（原话：「我的最后目的是可以将硬件带出去，不会在同一个网里面」）
@@ -258,8 +249,8 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               ④ 一键启动（launch-all.ps1）的探活从 UDP PING 改成 MQTT 心跳：
                   跑 tools/body_probe.py（8 秒内看到 state 就算在线），
                   用她 ASR 那个 venv 的解释器（那里有 paho-mqtt，不另装一套）。
-                  paths.json 删掉 bodyIp，加 bodyBase=whale-a90c6c /
-                  bodyBroker=broker.hivemq.com；run-body-talk.cmd 同步改成 --base/--broker。
+                  paths.json 删掉 bodyIp（那套 bodyBase/bodyBroker 后来 10-28 也删了，
+                  真值源只剩 state/body-config.json）。
             paho-mqtt 装在她 ASR 的 venv：
               C:\Users\Administrator\Desktop\QQ bot\qq-bridge-deploy\tools\asr\.venv
             已验证：`body_talk.py --text` 走通（她真的回话，喇叭念出来）；
@@ -425,19 +416,7 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               （`Get-Process python | ? {$_.CommandLine -like '*idf_monitor*'}` 后 Stop-Process），
               否则烧录报 `PermissionError(13, '拒绝访问')`。`--no-reset` 抓不到任何日志。
 
-2026-10-27  「她说话卡」四轮迭代的遗产（被下面第九修与 10-28 回退裸 PCM 取代）
-            四轮依次：垫底 2000ms → 绝对时间轴 → 让程序自报数据 → 整句预攒。
-            以后仍会用到的四条：
-            · 垫底（`lead_ms`）必须小于缓冲上限的一半，垫满会顶爆 `ddrop`。
-              当时缓冲 64KB=2048ms，垫 2000ms 溢出丢 48 帧，降到 900/500 才对。
-            · 发送节拍必须用**绝对时间轴**（第 k 块对齐 `anchor + k*chunk_ms`）；
-              写成 `t_next = now + chunk_ms` 每块欠几毫秒，整句累积成 1 秒多。
-            · `Link.health()` 的 `backlog`（paho 内部未发出报文数）持续变大 = 网络堵，
-              此时要**放慢**（PACE_SLOW=1.35），猛灌只会更糟。
-            · 测量纪律：`Link.state` 是**静态快照**，PING 后立刻读拿到旧值；
-              播放期间别狂打 PING（每秒 7 包会把链路顶进丢包区）。
-            · 固件计数器单位：spkb/spks 是**立体声**字节（64B=1ms）；
-              sbuf/dbytes 是**单声道**字节（32B=1ms）。别搞混。
+2026-10-27  「她说话卡」四轮迭代的遗产（其余细节已被下面的第九修取代）
             📐 方法论（比代码值钱，第二次踩）：用户报「实机卡、你测着顺」时，
               不要靠推断调参数。让程序自己报数（`health()` + 收尾日志里
               ship/睡眠/等TTS 的拆解）；第三次则直接列两端**行为差异**逐个排除。
@@ -446,34 +425,14 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
 
 2026-10-27 🧯 第九修：喇叭缓冲 2 秒 → 8 秒，送料主动留 6% 余量
    主人说"前面10个字左右很流畅，就是后面的卡"（m08574）—— 10 个字约 2 秒，
-   正好是当时 `SPK_BUFFER_BYTES = 64*1024` 的容量（16k 单声道，32 字节 = 1ms，
-   ⇒ 2048ms）。症状与"缓冲一开始满、随后被吃空"完全吻合。
-
-   算账（这是根因，必记）：
-     主人实机日志 ✅ 发完 286 包（17160ms 音频，总耗时 18469ms）
-     ⇒ 送料只有 93.3% 实时。而 `PACE = 1.0` 只是**目标**值，实际每块比 due
-     晚 4.5ms（Windows sleep 粒度 + ship() 自身 4ms 开销），17 秒欠 1.1 秒，
-     把垫底吃光 ⇒ 句尾必卡。**缓冲只够 2 秒，任何欠账都无处吸收。**
-
-   三处改动：
-   · `main/config.h`：`SPK_BUFFER_BYTES (64*1024)` → **`(256*1024)`**（8192ms）
-   · `main/main.c:149`：`xStreamBufferCreate` → `xStreamBufferCreateWithCaps(...,
-     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`，失败退回内部 RAM 64KB 并 LOGW。
-     ⚠️ 256KB 必须进 PSRAM：内部 RAM 只剩约 300KB，一次吃掉会让 Wi-Fi/MQTT 崩。
-   · `tools/tts_to_board.py`：`PACE` 固定 **0.94**（不再 `1.0 if full_prebuf`）；
-     `LEVEL_HIGH 1500 → 5000`、`LEVEL_LOW 600 → 1200`（跟着缓冲放大）。
-   · `tools/body_talk.py`：`lead_ms 500 → 2500`（8 秒缓冲下垫底可以大胆）。
-
-   实测（`.tmp/t_buf8.py` 灌 10 秒 + `.tmp/t_long8.py` 走真实 speak()）：
-   ```
-   灌 10080ms → 灌完立刻 sbuf=4920ms（旧固件会卡在 2048）
-   真念 20400ms 长句：
-     垫了 2460ms 打底，总耗时 19437ms（104.9% 实时）
-     板子侧 窗口写 I2S 20280ms、静音 3240ms（占 16%）
-     溢出丢帧 0 ｜ 残留 buff 3360ms
-   ```
-   ⇒ 8 秒缓冲生效（heap 8160224 → 7933984，正好少 226KB，PSRAM 分到了）；
-      静音只剩首尾，**中段 0%**；`ddrop = 0`（旧参数下这里常爆）。
+   正好是当时 `SPK_BUFFER_BYTES = 64*1024` 的容量（32 字节 = 1ms ⇒ 2048ms）。
+   根因：实机送料只有 93.3% 实时（`PACE=1.0` 只是目标，Windows sleep 粒度让每块
+   晚 4.5ms，17 秒欠 1.1 秒），**缓冲只够 2 秒，任何欠账都无处吸收**。
+   改动：`config.h` `SPK_BUFFER_BYTES` → `(256*1024)`（8192ms，必须用
+   `xStreamBufferCreateWithCaps(..., MALLOC_CAP_SPIRAM)`，内部 RAM 一次吃 256KB 会崩
+   Wi-Fi/MQTT）；`tts_to_board.py` `PACE` 固定 0.94、`LEVEL_HIGH 5000`/`LEVEL_LOW 1200`；
+   `body_talk.py` `lead_ms 2500`。
+   实测灌 10 秒 → `sbuf=4920ms`（旧固件卡在 2048）；念 20400ms 长句中段静音 0%、`ddrop 0`。
 
 2026-10-28  ✅ 下行回退成裸 PCM（0xAA），用户实测「完全通顺」
             用户原话（m10099）：「现在我测试完全通顺」
@@ -610,6 +569,30 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               📌 要复现得先有 EMQX 凭据（`main/secrets.h` 里 MQTT_USER/MQTT_PASS
                 现在都是空串）。在这之前别急着换 broker。
 
+2026-10-28  🔴 Opus 下行「一个字都没到板子」= flush 把编码器 drain 死了还在复用
+            症状：控制台切 opus 后，日志刷 `[body_mqtt] ⚠️ Opus 编码失败
+              （[Errno 541478725] End of file），本块丢弃`，整句被丢；
+              板子侧「窗口内写 I2S 6480ms，**静音 6480ms**」—— 全是静音。
+            根因：PyAV 的 `cc.encode(None)` 会把 codec context 推进 **EOF/drain
+              状态**，之后同一个 context 再 encode 任何帧都抛 `EOFError 541478725`。
+              而 `body_opus.Encoder` 缓存在 `Link._enc` 上跨轮复用 ⇒ **只要 flush
+              过一次，这个进程后面所有句子全部编码失败**。
+              触发点极其隐蔽：每轮开头 `link.beep()` 的结尾就调了
+              `send_audio_flush()` ⇒ 「叮」一响，编码器当场报废，她接下来说的
+              每一个字都没到板子。
+            📌 为什么之前测试是好的：`.tmp/t_opus_ping.py` 没调 `beep()`，
+              所以从没触发。**测试必须覆盖真实调用顺序**，不能只测"发音频"。
+            修法（`tools/body_mqtt.py`）：
+              ① `send_audio_flush()` 里 drain 完 **`self._enc = None`**，下一句重建
+                 （新建一次几毫秒，比整句消失便宜得多）。
+              ② `send_audio()` 的 except 里不再"丢弃本块"，改成丢弃编码器→重建→
+                 重试一次；重建也失败才退回裸 PCM（`_send_pcm()` 抽成独立方法）。
+            验证：`.tmp/test_opus_beep.py` 三轮「beep+说话」全部 6 包 0xAC、
+              2202 字节，无失败；真板子 `.tmp/verify_opus_real.py` 用
+              `(spkb-spks)` 差值算真实语音 = **8040ms**（此前同指标是 0）。
+            📌 判据：**怀疑下行没声音时，先算 `(spkb 差 - spks 差)/64`**，
+              它等于"真语音毫秒数"，静音全都会被 spks 抵掉，比看 dpkts 靠谱。
+
 2026-10-28  ✅ 阶段小结：**耳朵和嘴这一层已经完工**（用户实机确认「完全通顺」）
             现在能做的：板子通电 → 双击一键启动 → 直接跟她说话，
               和她 QQ 私聊是同一个会话、同一段记忆。
@@ -617,7 +600,8 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               上下行音频、控制台调音量/停顿/单句上限。
 
             ⚠️ 遗留的技术债（都不是"坏了"，是有代价）：
-              · 下行裸 PCM，流量 115MB/h。带出门长时间聊要考虑（优先压上行）。
+              · 下行现在有开关（控制台「身体·声音」→ 下行编码）：opus 约 2KB/s，
+                pcm 32KB/s。出厂默认 pcm；带出门再切 opus（板子现场解码，吃 CPU）。
               · 上行 Opus 的开销还在（板子要编码），如果哪天 CPU 吃紧可以回退。
               · `docs/BODY-BUILD.md` 里关于 Opus 的段落现在与代码不一致，
                 下次动那头之前先对齐，别照着旧文档改回来。
@@ -642,6 +626,110 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               qq-bridge-deploy\专项控制台.bat。
             📌 规则：用 write 写批处理之后**必须跑一次**（`cmd /c "xxx.cmd --help"`），
               能打出正文才算写对；别只看文件内容像不像。
+
+2026-10-28  🔍 全量巡检（主人说「类似的其他地方检查一下」）—— 抓到的都是同一类病：
+            「A 变了，B 还在按 A 的旧值办事」。四处已修：
+            ① `tools/mqtt_audio.py` 的 record **一包都收不到**：判据只认首字节 0xAA，
+               而板子 10-27 就改成 0xAC（Opus 三帧打包）上行 ⇒ 每包计入「坏包」，
+               看起来像板子没开麦。现在 0xAA/0xAB/0xAC 三种都认，Opus 走 body_opus.Decoder。
+            ② 同一文件 `play_pcm` / `record` 里 `kw` 是 main() 的局部变量 ⇒
+               `NameError: name 'kw' is not defined`，tone/play 一跑就崩。两处各自 `link_kwargs()`。
+            ③ `mqtt_probe.py` / `mqtt_audio.py` 的 broker 默认值取 body_mqtt.DEFAULT_*
+               —— 那里面没有账号 ⇒ 连 EMQX 一直 `Bad user name or password`。
+               一律改走 `body_config.link_kwargs()`。
+            ④ 文档在骗人：body_mqtt.py / body_probe.py 头部写「state 每 5 秒一条」，
+               固件 `STATE_PERIOD_MS` 是 **30000**。真实行为是「平时 30 秒，状态一变立刻补一条」，
+               探活快是因为 connect() 会先发 PING 催一条 —— 不是心跳快。
+            顺手删的死东西：`record(min_s=0.4)`（函数体从没用过）、
+              `body_mode.py` 末尾不可达的 `return 0`、`Link._dropped`（只赋值从不读）、
+              `speak_streaming(full_prebuf_s=6.0)`（从没实现）、体检里没人用的 `idle`。
+            还有一处真会让人误判：`snapshot()` 超时会拿**上一条 state** 兜底 ⇒
+              差值全是 0 ⇒ 日志像在说「板子没出声」。现在 played/sil 都为 0 时
+              直接打「这轮没拿到新心跳，体检数字不可信」。
+            📌 规则：任何「阈值/常量/判据」都写清它量的是哪一侧
+              （上行 60ms 一帧 vs 下行 120ms 一包，两者早已不相等）。
+
+2026-10-28  ✅ QQ 和她的身体接起来了（主人 m13018：「让我在 QQ 让她说一句话，它可以通过
+            板子发出来；或者我在板子说发送一张图片，它可以在 QQ 直接给我发」）
+            方向①（板子说 → QQ 发）：本来就有。`/api/body/turn` 把话投进她 QQ 那条会话，
+              她的回复文本走 TTS 念出来。**上一版在 bodyContext 里硬写了「这轮不要调
+              qq_send_message / qq_reply / qq_say」** —— 那条现在改成「默认别发，但我要你
+              做一件事（发图/发文件/查东西）就去调工具」，判据写在提示里：
+              结果我在屋里看不见 ⇒ 走工具；只是说给我听的 ⇒ 别说两遍。
+            方向②（QQ 说 → 板子放）：全新，四段拼起来：
+              1. `rot/tools/body_say.py`（新）：不自己实现连 broker + 念句子，直接
+                 `import body_talk` 用它的 `speak()` —— 音色、音量、下行编码热切换、
+                 垫底节拍都是拿十几轮实机卡顿换来的，重写一遍必错。
+                 退出码 0 念完 / 1 板子不在线 / 2 链路抖动。
+              2. `src/bridge.js` 的 `bodySay(config, text, volume, timeoutMs)`（第 468 行）：
+                 spawn `BODY_PROBE_PYTHON` + `body_say.py`，形制照抄 bodyProbe/bodySetMode。
+                 桥接自己**不能**连 MQTT —— package.json 里没有 mqtt 库，paho 在 venv 里。
+              3. `POST /api/body/say`（第 5854 行）：两道闸 —— ① `key` 必须等于
+                 `private:${cfg.ownerQQ}`，别人私聊和群聊一律 403（喇叭装在他屋里）；
+                 ② 板子在线由脚本自己 wait_state 判，端点不另做探活（否则连两遍 broker）。
+              4. `src/mcp-snowluma-safe.js` 的 `qq_body_say` 工具（第 870 行）+
+                 agent 白名单加 `/api/body/say`（第 5741 行）。
+                ⚠️ `/api/body/turn` **绝不能**进白名单：它能读到一条会话的全部回复文本，
+                   放给 AI 等于绕过发送闸门直接产出文本。
+                ⚠️ `/api/body/config` 更不能：里面有 broker 账号密码。
+            工具守卫 `plugins/qq-agent-presets/qq-tool-restrict.mjs` 加了 `BODY_SAY_TOOLS`，
+              必须**排在 SAFE_PREFIXES 之前**（前缀是整包放行，放后面永远走不到）。
+              拒绝文案特意写「它让主人屋里的音箱真的出声」而不是「权限不足」——
+              她拿到抽象理由会以为是自己用错，然后换个说法反复重试。
+            设计取舍（主人 m13018 拍板）：
+              · QQ→板子**不做自动镜像**，只在她主动调工具时念。否则喇叭变成 QQ 的复读机。
+              · 板子上说的话**允许她动手**（发图/发文件），不再一刀切禁止。
+            验证：`node --check` 三个文件；`scripts/test-tool-classification.mjs` 83 个工具
+              不变式成立；端点三例（管理员私聊 502 板子离线 / 别人私聊 403 / 群聊 403）；
+              带假 agent 令牌时 `/api/body/say`、`/api/body/turn`、`/api/body/config`
+              全被 `x-agent-call` 那道闸拦成 403。
+            ✅ 已实机验过（板子上电后）：`POST /api/body/say` 一次 10.15 秒返回
+              200，`detail` = 「✅ 板子在线（rssi -57，IP 192.168.1.101，模式 室内）|
+              ✅ 发完 54 包（6480ms 音频，缺料 0 次）| ✅ 念完了（9.5s，掉线 0、
+              publish 失败 0）」。从 QQ 侧让她调这个工具的那一步还未实测。
+              另外新工具**不需要**重跑 setup-dsh：`mcp-snowluma` 那条指向的是整个
+              `src/mcp-snowluma-safe.js` 文件（`~/.dsh/profiles/desktop/cordis.patch.yml`
+              第 30~40 行，其余 profile 都没有这段托管块），加工具只是往那个文件里多注册一个，
+              重启 DSH 就带上。只有**新建一个 MCP server 文件**才要动 setup-dsh。
+
+2026-10-28  🗒️ 记忆：补上「她说了什么」+ 改成**双档**（每天 15 条，主人 m13677/m13999）
+            bug：语音条的正文是空的（只有一段 record），所以 `messages.db` 那条
+              记录看不到内容 ⇒ 记忆整理读库时，她的那一半永远只是 `[语音 5.2s]`，
+              记忆里全是"主人说了什么"。她越用语音，坑越大。
+            修：`src/bridge.js` 的 `speakForV2` 发完语音后调 `appendSentVoiceLog()`
+              落 `state/sent-voice-logs/YYYY-MM-DD.jsonl`（一行 {t,key,text}，
+              只记原文不记音频路径）。整理侧 `qq-memory-rollover.mjs` 新增
+              `readDaySentVoiceLogs()`，在 `buildTranscript` 里把 `[语音]` 换成原文。
+            ⚠️ 匹配必须按**时间就近**（±20 秒、一条只用一次），不能按顺序：
+              `sendVoiceForV2`（她手发音频文件）也留 `[语音]` 但没有旁注，
+              一按顺序就整体错位一位，记忆里每句都张冠李戴。配不上一律留白。
+
+            🔴 双档（主人：「按需检索的如果只是占用我的本地空间，那完全可以弄详细啊」）：
+              每条记忆两个字段 —— `text`（要点 ≤80 字，进角色卡索引，每轮重读）
+              和 `detail`（详细 ≤200 字，**只进** `daily-memory.json`，检索才读）。
+              ⇒ 条数可以放心提到 **15 条/天/会话**，每轮上下文成本**不变**。
+              提炼提示词要求模型输出「要点｜详细」，`detail` 解析取**第一个「｜」**
+              （详细里偶尔有竖线，取最后一个会把整段吞进 text 撑爆索引）。
+              检索侧 `searchDailyMemory()` 把 detail 渲染成 `  ↳ 详细` 第二行，
+              且**关键词同时搜 detail** —— 只搜 text 的话细节里的人名/地点永远搜不到。
+              `maxChars` 4000 → 8000（default limit=12 要装得下 200 字详细）。
+            ⚠️ 连带修的真 bug：`existingFlat` 原来是
+              `flatMap(d => d.items).filter(Boolean)`，而 items 元素早已是
+              `{scope,text}` 对象 ⇒ `normalizeForCompare(String(obj))` 全是
+              `"[objectobject]"`，永远不等于任何真要点 ⇒ **跨天去重静默失效**
+              （同一件事每天重记一遍）。现在显式取 `it.text`。
+            ⚠️ 索引只读 `text`（`memory-index.mjs` 的 `memoryToIndexLines` /
+              `selectIndexItems` 都是 `it.text`）⇒ detail 不会漏进角色卡。
+              实测最坏情况（三天各灌 15 条 × 200 字）：索引条目区 1013 + 开销 420
+              = 1433 < 硬顶 1500，角色卡 7872 < 注入上限 9000。
+            排查工具：`--dump-voice 2026-10-28`（不调模型、不写记忆，只打旁注原文）、
+              `--reindex`（只刷新角色卡索引，不重跑提炼）。
+            ⚠️ 改了 bridge.js 和 rollover 都要重启：桥接带 `POST /api/restart`，
+              rollover 是独立守护进程（`state/rollover.pid`），要单独停再起。
+            验证：`node --check` 两文件；`node --test scripts/test-memory-*.mjs`
+              共 76 用例全绿；`npm run test:tools` 83 个工具不变式成立；
+              临时脚本验过"有旁注补原文 / 无旁注不丢 / 手发斜插不错位 /
+              detail 只出现在第二行 / 只出现在 detail 里的词能搜到 / 老数据不带 ↳"。
 
 ```
 ## 5. 两个仓库的关系

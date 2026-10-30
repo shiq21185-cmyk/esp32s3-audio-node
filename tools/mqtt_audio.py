@@ -4,8 +4,10 @@
     python mqtt_audio.py play --file demo.wav
     python mqtt_audio.py tone --seconds 1.5          # 先放个测试音，确认喇叭通
 
-板子上行：<base>/audio/up    每包 1 + 1920 字节，首字节 0xAA，16k **单声道** 16bit
-板子下行：<base>/audio/down  同样格式
+连接参数走控制台配置（state/body-config.json），不用手填 broker/账号。
+
+板子上行：<base>/audio/up    首字节 0xAC＝3 帧 Opus 打包，0xAB＝单帧 Opus，0xAA＝裸 PCM
+板子下行：<base>/audio/down  首字节 0xAA＝16k 单声道 16bit 裸 PCM
 （板子内部 I2S 仍是立体声，网络上只传一路，省一半带宽）
 """
 
@@ -21,11 +23,14 @@ import wave
 
 import paho.mqtt.client as mqtt
 
+import body_config
 import body_mqtt
 
 SAMPLE_RATE = 16000
 FRAME_BYTES = 2          # 16bit × 单声道（线上是单声道，省一半带宽）
-MAGIC = 0xAA
+MAGIC = 0xAA            # 下行（电脑→板子）裸 PCM 的头
+MAGIC_UP_BATCH = 0xAC   # 上行（板子→电脑）Opus 三帧打包的头 —— 板子现在就用这个
+MAGIC_UP_OPUS = 0xAB    # 上行单帧 Opus（老格式，留着兼容）
 CHUNK_BYTES = 1920       # 60 ms，和固件 config.h 里的 CHUNK_BYTES 保持一致
 DEFAULT_BASE = body_mqtt.DEFAULT_BASE
 
@@ -94,21 +99,49 @@ def record(args) -> int:
     buf = bytearray()
     topic = f"{args.base}/audio/up"
 
-    cli = body_mqtt.configure_client(make_client())
+    kw = body_config.link_kwargs()
+    cli = body_mqtt.configure_client(
+        make_client(), kw.get("user"), kw.get("password"), kw["use_tls"])
 
     def on_connect(c, u, flags, rc, *extra):
         state["connected"] = True
         c.subscribe(topic, qos=0)
         print(f"[订阅] {topic}")
 
+    # 上行三种头都要认：0xAA 裸 PCM（很老）、0xAB 单帧 Opus、0xAC 多帧打包。
+    # 2026-10-28 巡检发现的坑：这里原来只认 0xAA，而板子早改成 0xAC 上行，
+    # 于是这个工具**一包都收不到**，还会把每包算成「坏包」—— 看起来像板子没开麦。
+    dec = {"d": None}
+
     def on_message(c, u, msg):
         if msg.topic != topic:
             return
         payload = msg.payload
-        if payload and payload[0] == MAGIC:
+        if not payload:
+            return
+        kind = payload[0]
+        if kind == MAGIC:
             buf.extend(payload[1:])
             got["pkts"] += 1
             got["bytes"] += len(payload) - 1
+        elif kind in (MAGIC_UP_BATCH, MAGIC_UP_OPUS):
+            import body_opus
+            if dec["d"] is None:
+                dec["d"] = body_opus.Decoder()
+            try:
+                frames = (body_opus.split_batch(bytes(payload[1:]))
+                          if kind == MAGIC_UP_BATCH else [bytes(payload[1:])])
+            except Exception:
+                got["bad"] += 1
+                return
+            got["pkts"] += 1
+            for fr in frames:
+                pcm = dec["d"].decode(fr)
+                if pcm:
+                    buf.extend(pcm)
+                    got["bytes"] += len(pcm)
+                else:
+                    got["bad"] += 1
         else:
             got["bad"] += 1
 
@@ -154,7 +187,9 @@ def record(args) -> int:
 def play_pcm(pcm: bytes, args) -> int:
     state: dict = {}
     topic = f"{args.base}/audio/down"
-    cli = body_mqtt.configure_client(make_client())
+    kw = body_config.link_kwargs()
+    cli = body_mqtt.configure_client(
+        make_client(), kw.get("user"), kw.get("password"), kw["use_tls"])
 
     def on_connect(c, u, flags, rc, *extra):
         state["connected"] = True
@@ -205,9 +240,11 @@ def build_tone(seconds: float, freq: float = 1000.0, amp: float = 0.35) -> bytes
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--broker", default=body_mqtt.DEFAULT_BROKER)
-    ap.add_argument("--port", type=int, default=body_mqtt.DEFAULT_PORT)
-    ap.add_argument("--base", default=DEFAULT_BASE)
+    # 同 mqtt_probe.py：一律走控制台配置，否则没有账号连不上 EMQX。
+    kw = body_config.link_kwargs()
+    ap.add_argument("--broker", default=kw["broker"])
+    ap.add_argument("--port", type=int, default=kw["port"])
+    ap.add_argument("--base", default=kw["base"])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("record")
@@ -223,7 +260,6 @@ def main() -> int:
     t.add_argument("--amp", type=float, default=0.35)
 
     args = ap.parse_args()
-    ap.set_defaults()  # 默认值来自 body_mqtt（broker/端口/账号都在那边）
 
     if args.cmd == "record":
         return record(args)

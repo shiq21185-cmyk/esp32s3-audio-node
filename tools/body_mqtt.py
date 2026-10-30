@@ -7,10 +7,10 @@ D4 那套是 UDP 点对点：板子和 PC 必须在同一张网里。身体要�
 
 板子在 `firmware/d8-mqtt-audio`，主题约定（base = whale-1bb62897）：
 
-    <base>/audio/up    板子 → PC   每包 1 + 1920 字节，首字节 0xAA
-    <base>/audio/down  PC → 板子   同样格式
-    <base>/cmd         文本指令     "MIC 1" 开麦 / "MIC 0" 关麦
-    <base>/state       每 5 秒一条 JSON（含 "mic":0/1、rssi、heap）
+    <base>/audio/up    板子 → PC   首字节 0xAC=3 帧 Opus 打包（0xAB=单帧，0xAA=裸 PCM）
+    <base>/audio/down  PC → 板子   首字节由下行编码决定：0xAC=Opus 打包 / 0xAA=裸 PCM
+    <base>/cmd         文本指令     "MIC 1" 开麦 / "MIC 0" 关麦 / "GATE 0|1" / "MODE 0|1"
+    <base>/state       心跳 JSON   平时每 30 秒一条；状态一变（开麦/模式/门限）立刻补一条
 
 线上是 **16k / 16bit / 单声道**（板子内部 I2S 仍是立体声，硬件要时钟；
 它在收发的两头各做一次转换）。1920 字节 = 960 帧 = 60 ms。
@@ -106,7 +106,7 @@ class Link:
     def __init__(self, base=DEFAULT_BASE, broker=DEFAULT_BROKER,
                  port=DEFAULT_PORT, keepalive=30,
                  user=DEFAULT_USER, password=DEFAULT_PASSWORD,
-                 use_tls=DEFAULT_TLS, client_id=None):
+                 use_tls=DEFAULT_TLS, client_id=None, down_codec=None):
         self.base = base
         self.broker = broker
         self.port = port
@@ -129,7 +129,6 @@ class Link:
         self._state_n = 0        # 收到过几条 state —— alive() 靠它判断"有没有新的一条"
         self._state_bad = 0      # 解析失败的 state 条数（>0 = 固件 payload 被截断了）
         self._connected = False
-        self._dropped = 0
         self._last_error = ""
         self._decoder = None     # body_opus.Decoder，第一次收到 0xAB 才建
         self._enc = None         # body_opus.Encoder，第一次 send_audio 才建
@@ -139,6 +138,9 @@ class Link:
         self._pcm_pkts = 0
         self._bad_pkts = 0
         self._pend: list[bytes] = []   # 已编码但还没凑够一包发送的 Opus 帧
+        # 下行编码：pcm = 裸 PCM（32KB/s，最省 CPU）；opus = 板子现场解码（2KB/s）
+        # 传 None 表示"用全局默认 PCM"，由调用方（body_talk）从控制台配置里读。
+        self.down_codec = "opus" if str(down_codec or "").lower() == "opus" else "pcm"
         self._pub_fail = 0       # publish 返回非成功值的次数
         self._disc = 0           # 掉线次数（on_disconnect 回调计数）
         self._pub_bytes = 0      # 已交付给 paho 的下行音频总字节
@@ -307,7 +309,8 @@ class Link:
         """开/关板子的麦克风。开了之后板子才开始往 <base>/audio/up 发包。
 
         返回是否在 wait 秒内看到 state 里 mic 真的变成想要的值
-        （state 每 5 秒才发一次，所以没等到不代表失败，只是没确认）。
+        （固件改完会立刻 publish_state("mic")，所以通常 0.1 秒内就能确认；
+        等不到只说明这一条 state 没到，不代表开麦失败）。
         """
         self.client.publish(self.t_cmd, "MIC 1" if on else "MIC 0", qos=0)
         want = 1 if on else 0
@@ -346,13 +349,70 @@ class Link:
         bad = sum(1 for v in arr if v > 30000 or v < -30000)
         return pk, bad / len(arr)
 
+    def _get_encoder(self):
+        """懒建 Opus 编码器。只在下行选了 opus 时才建。
+
+        起不来（没装 PyAV / 没有 libopus）就返回 None，调用方退回裸 PCM ——
+        绝对不能因为省流量而让整句话消失。
+        """
+        if self._enc is not None:
+            return self._enc
+        if self._enc_failed:
+            return None
+        try:
+            from body_opus import Encoder
+            self._enc = Encoder()
+            return self._enc
+        except Exception as exc:
+            self._enc_failed = True
+            print(f"[body_mqtt] ⚠️ Opus 编码器起不来（{exc}）—— 下行退回裸 PCM",
+                  file=sys.stderr)
+            return None
+
     # ---------------- 发 ----------------
     def send_audio(self, payload: bytes):
-        """往板子喇叭推一包 PCM（payload 是 16k 单声道裸 PCM，不带包头）。
+        """往板子喇叭推一包音频（payload 是 16k 单声道裸 PCM，不带包头）。
 
-        2026-10-28：不再做 Opus 编码，直接发裸 PCM。
-        Opus 16kbps 对中文语音损伤太大（机械音+断续感），用户实机确认。
+        下行有两种走法，由 self.down_codec 决定：
+          pcm  —— 直接发裸 PCM，首字节 0xAA。32KB/s，板子只搬运不解码。
+          opus —— 编成 Opus 帧，凑 3 帧打成一个包，首字节 0xAC。约 2KB/s，
+                  板子现场解码。这是 10-28 回退前的老路子，现在做成开关。
+
+        ⚠️ 无论哪种，**包头都由这里加，sink 那边绝不能再加**
+        （ts_to_board 的注释里记着这条：加两次会让 PCM 错开半个采样点=白噪音）。
         """
+        if self.down_codec == "opus":
+            enc = self._get_encoder()
+            if enc is not None:
+                try:
+                    for fr in enc.encode(payload):
+                        self._pend.append(fr)
+                except Exception as exc:
+                    # 编码器可能已被 drain 过（见 send_audio_flush 的注释）。
+                    # 扔掉它重建一次再试，**不能直接把这一块丢了**——
+                    # 丢了就是一段静音，而症状看不出来。
+                    self._enc = None
+                    retry = self._get_encoder()
+                    if retry is not None:
+                        try:
+                            for fr in retry.encode(payload):
+                                self._pend.append(fr)
+                        except Exception as exc2:
+                            print(f"[body_mqtt] ⚠️ Opus 编码失败（{exc} → 重建后仍 "
+                                  f"失败 {exc2}），本块丢弃", file=sys.stderr)
+                    else:
+                        print(f"[body_mqtt] ⚠️ Opus 编码失败（{exc}），编码器重建失败，"
+                              f"退回裸 PCM", file=sys.stderr)
+                        self._send_pcm(payload)
+                        return
+                self._drain_batch()
+                return
+            # 落下来走 PCM
+
+        self._send_pcm(payload)
+
+    def _send_pcm(self, payload: bytes):
+        """直接发裸 PCM（首字节 0xAA）。opus 走不通时的兜底。"""
         self._pub_bytes += len(payload) + 1
         try:
             info = self.client.publish(self.t_down, bytes([MAGIC_PCM]) + payload, qos=0)
@@ -391,8 +451,39 @@ class Link:
             pass
 
     def send_audio_flush(self):
-        """裸 PCM 模式不需要 flush（没有编码器缓冲）。保留接口兼容性。"""
-        pass
+        """把编码器里剩下的零头挤出来发掉。
+
+        PCM 模式什么都不用做（每个字节都已经发出去了）。
+        Opus 模式必须做，否则每句话结尾会吞掉几十毫秒，听感是句尾「咔」一下。
+
+        🔴 2026-10-28 血泪：PyAV 的 `cc.encode(None)` 会把 codec context 推进
+        EOF（drain）状态，**之后同一个 context 再 encode 任何帧都抛
+        `EOFError: [Errno 541478725] End of file`**。而编码器是缓存在
+        `self._enc` 上跨轮复用的 ⇒ 只要 flush 过一次，这个进程后面所有句子
+        全部编码失败、静音。
+        真实现场：每轮开头 `beep()` 的结尾就调了一次 flush，于是「叮」之后
+        她说的**每一个字都没到板子**，日志是「窗口内写 I2S 6480ms，静音 6480ms」。
+        所以：**drain 完必须把编码器扔掉**，下一句重建（新建一次几毫秒，
+        比整句话消失便宜得多）。
+        """
+        if self.down_codec != "opus":
+            return
+        enc = self._get_encoder()
+        if enc is not None:
+            try:
+                for fr in enc.flush():
+                    self._pend.append(fr)
+            except Exception:
+                pass
+            finally:
+                # 关键：flush 之后这个 encoder 已经作废，不能再用
+                self._enc = None
+        # 尾巴不足 3 帧也要发出去，不能留在 _pend 里等下一句
+        if self._pend:
+            from body_opus import pack_batch
+            group = self._pend
+            self._pend = []
+            self._publish(bytes([MAGIC_BATCH]) + pack_batch(group))
 
     def beep(self, hz=880, ms=70, amp=2600):
         """从板子喇叭放一声很轻的"叮"，提示"轮到你说"。"""
@@ -503,9 +594,21 @@ class Link:
         return False
 
 
-def probe(base=DEFAULT_BASE, broker=DEFAULT_BROKER, timeout=6.0):
-    """板子在不在？返回它的 state（空字典 = 没看到）。"""
-    link = Link(base=base, broker=broker)
+def probe(base=None, broker=None, timeout=6.0):
+    """板子在不在？返回它的 state（空字典 = 没看到）。
+
+    ⚠️ 别用 Link() 的模块默认值凑合：`DEFAULT_USER/DEFAULT_PASSWORD` 都是
+    None，`configure_client()` 就不会发账号密码 —— 连我们自己的 EMQX 会一直
+    "Bad user name or password"。所以这里走 body_config.link_kwargs()，
+    跟身体那条链路用同一份配置。
+    """
+    from body_config import link_kwargs
+    kw = link_kwargs()
+    if base:
+        kw["base"] = base
+    if broker:
+        kw["broker"] = broker
+    link = Link(**kw)
     try:
         link.connect()
         return link.wait_state(timeout)
