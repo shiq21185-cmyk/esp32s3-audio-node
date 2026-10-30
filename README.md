@@ -63,12 +63,21 @@ MQTT 版跨公网（杭州 Serverless broker）一整轮对话首音 1.2 秒、�
 | 电源 | USB-C 5V | 见 [docs/hardware.md](docs/hardware.md) 的电流说明 |
 
 参考实物是一块 61×46 mm 的成品语音板（ESP32-S3-WROOM-1 + INMP441 + MAX98357 + WS2812 指示灯），
-**引脚定义和接线表都在 [docs/hardware.md](docs/hardware.md)**。面包板手接也完全一样，只需要改各自 `config.h` 里的六个引脚号。
+**引脚定义和接线表都在 [docs/hardware.md](docs/hardware.md)**。
 
-两套固件的引脚定义**完全一致**（`PIN_MIC_BCLK 4` / `PIN_MIC_WS 5` / `PIN_MIC_DIN 6` /
-`PIN_AMP_BCLK 16` / `PIN_AMP_LRC 17` / `PIN_AMP_DOUT 15`），所以同一块板子换固件不用改线。
+固件支持两种接法，换板子只改 `main/config.h` 顶部的 `BOARD_PROFILE`，**不用改代码**：
 
-MQTT 版多用一个按键（`PIN_BTN 1`，一头接 IO1、一头接 GND，按下 = 低电平）做「我现在要说」。
+| 板型 | 说明 | 麦克风 SCK/WS/SD | 功放 BCLK/LRC/DIN | 按键 |
+|---|---|---|---|---|
+| `BOARD_INTEGRATED`（默认） | 一体式语音板（参考板实测引脚） | 4 / 5 / 6 | 16 / 17 / 15 | IO1 |
+| `BOARD_BREADBOARD` | GOOUUU 果云版 42 脚开发板 + 面包板 | **5 / 4 / 6** | **15 / 16 / 7** | BOOT (GPIO0) |
+
+⚠️ 两套的 BCLK/WS 是**交叉**的，接反不是声音小，是彻底没声音，而串口日志一切正常。
+面包板那种接法的完整说明见 [docs/hardware.md §3.1](docs/hardware.md)。
+
+两套固件（UDP / MQTT）的引脚定义完全一致，所以同一块板子换固件不用改线。
+
+MQTT 版多用一个按键（一头接按键脚、一头接 GND，按下 = 低电平）做「我现在要说」。
 不接也能跑，只是 `MODE 1`（随身模式）用不了。
 
 PSRAM：UDP 版不需要；**MQTT 版需要 8 MB 八线（N16R8）** —— 喇叭缓冲 256 KB 和 Opus

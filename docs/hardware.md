@@ -116,6 +116,38 @@ MAX98357 的兄弟 MAX98358 是差分输入，除非你已经有差分源否则�
 - **共地**：麦克风、功放、主控必须同一个 GND，否则会有嗡嗡声。
 - 麦克风的 SCK/WS 和功放的 BCLK/LRC 是两套**独立时钟**，不要为了「省两根线」把它们接在一起。
 
+### 另一种接法：GOOUUU 果云版 42 脚开发板（`BOARD_BREADBOARD`）
+
+上面 §3 的三张表用的是**参考板**的引脚。如果你手上是那种 42 脚的
+ESP32-S3-DevKitC-1（GOOUUU 果云版，比乐鑫标准版少几个引脚、左侧多了 GPIO19/20），
+按小智 AI 那套面包板教程的「果云版」接线，引脚是另一套 ——
+**改 `config.h` 顶部的 `BOARD_PROFILE` 为 `BOARD_BREADBOARD`，再重烧**，线不用动。
+
+| 功能 | 参考板（`BOARD_INTEGRATED`） | 面包板（`BOARD_BREADBOARD`） |
+|---|---|---|
+| INMP441 SCK (BCLK) | GPIO **4** | GPIO **5** |
+| INMP441 WS | GPIO **5** | GPIO **4** |
+| INMP441 SD (DIN) | GPIO 6 | GPIO 6 |
+| MAX98357 BCLK | GPIO 16 | GPIO **15** |
+| MAX98357 LRC (WS) | GPIO 17 | GPIO **16** |
+| MAX98357 DIN | GPIO 15 | GPIO **7** |
+| 送话按键 | IO1（板上自带） | GPIO **0**（板上 BOOT 键） |
+
+```
+INMP441    SCK→GPIO5   WS→GPIO4   SD→GPIO6   VDD→3V3   GND→GND   L/R→GND
+MAX98357   BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7  VIN→5V    GND→GND   GAIN→GND
+```
+
+四个会让人白折腾半天的点：
+
+1. **BCLK 和 WS 是交叉的**（4/5 ↔ 5/4）。接反不会声音小，是彻底没声，
+   而串口日志一切正常 —— 极易误判成"固件坏了"。
+2. **L/R 必须接 GND**（悬空会读到全 0，推上去是一整片静音）。
+3. **3V3 / GND 排针不够分**：麦克风、功放、按键都要电和地。
+   买几条 1 分 2 的分叉杜邦线，或者把面包板的电源轨拉出来用。
+4. 按键用 BOOT（GPIO0）的副作用：**开机时按住会进下载模式**。正常使用没影响；
+   嫌碍事就换到任意空闲 GPIO 并改 `PIN_BTN`。
+
 ---
 
 ## 4. 电流与供电
