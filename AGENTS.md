@@ -36,34 +36,37 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
 ## 4. 当前状态（每次改完请更新这段）
 
 ```
-2026-10-30  ✅ 固件支持第二块板：果云版 42 引脚开发板 + 面包板（一块固件两块板）
+2026-10-30  ✅ 第三套固件：果云版 42 脚 + 面包板独立工程 `firmware/e1-breadboard`
             用户原话（m00002）：「我额外按照虾哥的小智ai链接方式做了一版面包板的硬件设备，
-              https://my.feishu.cn/wiki/EH6wwrgvNiU7aykr7HgclP09nCh 里面的果云版本」。
-            · 教程里有两套接线图，**必须选 2.2「GOOUUU 果云版 42 IO 引脚」**（还有 2.3.2 是带 4G 的），
-              别拿 2.1 标准版 44 引脚那张 —— 两张图的 GPIO 不一样。
-              我直接把那张接线表的标号放大读出来了（表格是图片，正文里读不到）：
-                INMP441  : SCK→GPIO5  WS→GPIO4  SD→GPIO6
-                MAX98357 : BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7   GAIN→GND
-                OLED(可选): SDA→GPIO41 SCL→GPIO42   按键: 音量+ GPIO40 / 音量- GPIO39 / BOOT GPIO0
-            · 和现有 wangxun 语音板比：麦克风的 BCLK/WS **是交叉的**（4/5 ↔ 5/4），
-              功放三根全不一样（16/17/15 → 15/16/7）。接反不是声音小，是彻底没声，
-              而串口日志一切正常 —— 极易误判成"固件坏了"。
-            · 改法：`firmware/d8-mqtt-audio/main/config.h` 顶部加 `BOARD_PROFILE` 开关，
-              `BOARD_WANGXUN`（默认，现有实物）/ `BOARD_GOOUUU`（果云面包板）。
-              换板子只改这一个宏，再 build + flash；`#else` 分支是 `#error`，写错板型编不过。
-              果云板没有"录音测试"键，送话键用板上自带的 BOOT（GPIO0）；
-              副作用是**开机时按住会进下载模式**，正常使用无影响，嫌碍事改 `PIN_BTN` 即可。
-            · 面包板侧的坑（写进 docs/BODY-BUILD.md §3.2.2）：
-              INMP441 的 **L/R 必须接 GND**（悬空 ⇒ 数据落右声道 ⇒ 固件只取左声道 ⇒ 全静音）；
-              果云板 3V3/GND 排针不够分，教程建议 1 分 2 分叉杜邦线；
-              教程的 BGA 版 MAX98357 不要接 GAIN。
-            · 验证：`BOARD_WANGXUN` 与 `BOARD_GOOUUU` 两种板型各完整 build 一次，
-              均 1034/1034 通过、`d8_mqtt_audio.bin` 0x11c940 字节（分区剩 24%）；默认已还原 wangxun。
-              ⚠️ 编译要用 powershell 并**先删掉 MSYSTEM**（这台机器系统级设了 MSYSTEM=UCRT64，
-                 IDF 的 MSYS 卫兵会直接拒掉、还 exit 0 什么都不编）：
-                 powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -EA SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\d8-mqtt-audio build'"
-              ⚠️ **还没在果云实物上通电验证**（板子刚焊/刚插好，不知道用户手里是不是这套）。
-                 第一次上电先看串口有没有 `I2S` 报错，再 `body_talk.py --text` 看上行 rms。
+              https://my.feishu.cn/wiki/EH6wwrgvNiU7aykr7HgclP09nCh 里面的果云版本」；
+            澄清（m00547）：「我是需要依照果云的做一个新的面包板类型的，不再是本地已经存在的
+              这个项目，新的还没写代码」⇒ **第三套是独立工程**，不是往 d8 里塞板型开关。
+            · 教程有两套接线图，**必须选 2.2「GOOUUU 果云版 42 IO 引脚」**（2.3.x 是带 4G 的），
+              别拿 2.1 标准版 44 引脚那张。接线表是**图片**，正文读不到 ——
+              我把图放大 4 倍逐根读出来（PIL 裁 .tmp/crop/*.png）：
+                INMP441  : SCK→GPIO5  WS→GPIO4  SD→GPIO6  VDD→3V3  L/R→GND
+                MAX98357 : BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7  VIN→5V  GAIN→GND
+                OLED(可选): SDA→GPIO41 SCL→GPIO42   按键: 音量+ 40 / 音量- 39 / BOOT 0
+            · 和 wangxun 语音板比：麦克风 BCLK/WS **交叉**（4/5 ↔ 5/4），功放三根全换
+              （16/17/15 → 15/16/7）。接反不是声音小，是彻底没声，而串口日志一切正常。
+            · 工程：`firmware/e1-breadboard`（从 d8 复制，CMake 工程名 e1_breadboard，
+              日志 TAG 改成 e1，能力与 d8 完全一致）。引脚直接写进它的 `main/config.h`，
+              **不再有 BOARD_PROFILE** —— d8 已恢复单一板型。
+              送话键用板载 BOOT（GPIO0）；副作用是**开机时按住会进下载模式**，正常用无影响。
+            · 主题前缀必须隔离：d8 是 `whale-1bb62897`，e1 是 **`whale-8f2a5c31`**。
+              两条板同时在线、前缀一样时 PC 会同时收到两路（声音忽大忽小、计数器乱跳）。
+              换前缀三处：本工程 config.h / 控制台「身体·连接」/ body_config.py 默认值（可选）。
+            · 面包板侧的坑（docs/BODY-BUILD.md §3.2.2）：INMP441 的 **L/R 必须接 GND**
+              （悬空 ⇒ 数据落右声道 ⇒ 固件只取左声道 ⇒ 全静音）；3V3/GND 排针不够分，
+              建议 1 分 2 分叉杜邦线；BGA 版 MAX98357 不接 GAIN。
+            · 验证：e1 完整 build 1034/1034 通过，`e1_breadboard.bin` 0x11c940（分区剩 24%）。
+              ⚠️ 编译必须 powershell + **先删 MSYSTEM**（系统级 MSYSTEM=UCRT64，IDF 的 MSYS 卫兵
+                 会直接拒掉、**还 exit 0 什么都不编**）：
+                 powershell -NoProfile -Command "Remove-Item Env:MSYSTEM -EA SilentlyContinue; cmd /c 'tools\idf.cmd -C firmware\e1-breadboard build'"
+              ⚠️ **还没在任何一块果云实物上通电验证**（用户机器上只扫到 COM1，没插板子）。
+                 第一次上电先看串口 I2S 报错，再 `body_talk.py --text` 看上行 rms。
+            · 公开仓库 esp32s3-audio-node 另有一份「通用版」（板型开关 BOARD_INTEGRATED /
+              BOARD_BREADBOARD，commit 1ff1f79 已推），那是给外人看的版本，和这里互不干扰。
 
 
 2026-10-24 ~ 2026-10-28 的全部逐日记录（D1~D8、Opus、喇叭缓冲、state 截断、

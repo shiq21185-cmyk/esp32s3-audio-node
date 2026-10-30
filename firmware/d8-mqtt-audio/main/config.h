@@ -2,25 +2,7 @@
 
 #pragma once
 
-/* ==================== 板型 ====================
- * 同一套固件跑两块完全不同的板，差别只在「哪几根线」。
- * 换板子只改 BOARD_PROFILE 这一个数，然后重新 build + flash。
- *
- *   BOARD_WANGXUN  现有实物：wangxun 语音板（2026-10-26 实测出来的引脚）
- *   BOARD_GOOUUU   GOOUUU 果云版 42 引脚开发板 + 面包板，
- *                  按小智 AI 那份面包板教程的「果云版」接线
- *
- * ⚠️ 两套的 BCLK/WS 是**交叉**的（4/5 ↔ 5/4），功放三根也全不一样。
- *    接错不会"声音小"，是彻底没声音，而串口日志一切正常 ——
- *    别靠听去猜，对着 docs/BODY-BUILD.md §3.2 的表量一遍。
- */
-#define BOARD_WANGXUN   1
-#define BOARD_GOOUUU    2
-#define BOARD_PROFILE   BOARD_WANGXUN
-
-#if BOARD_PROFILE == BOARD_WANGXUN
-
-/* ---- 音频引脚（wangxun 语音板实测值）---- */
+/* ---- 音频引脚（这块 wangxun 语音板实测值）---- */
 #define PIN_MIC_BCLK     4
 #define PIN_MIC_WS       5
 #define PIN_MIC_DIN      6
@@ -29,35 +11,9 @@
 #define PIN_AMP_LRC      17
 #define PIN_AMP_DOUT     15
 
-/* 板上的「录音测试」按键（一头接 IO1，一头接 GND，按下 = 低电平）。 */
+/* 板上的「录音测试」按键（一头接 IO1，一头接 GND，按下 = 低电平）。
+ * 用途：按一下 = 「我现在要说」，强制开麦 10 秒，绕开本地人声门限。 */
 #define PIN_BTN          1
-
-#elif BOARD_PROFILE == BOARD_GOOUUU
-
-/* ---- 音频引脚（果云版 42 引脚开发板 + 面包板，照教程 2.2 节接线）----
- *   INMP441 : SCK→GPIO5  WS→GPIO4  SD→GPIO6  VDD→3V3  GND→GND  L/R→GND
- *   MAX98357: BCLK→GPIO15 LRC→GPIO16 DIN→GPIO7 VIN→5V  GND→GND  GAIN→GND
- *             （BGA 封装的那种不要接 GAIN，接了能出声就继续用）
- *   OLED    : SDA→GPIO41 SCL→GPIO42（本固件不驱动屏幕，留着给扩展版）
- */
-#define PIN_MIC_BCLK     5
-#define PIN_MIC_WS       4
-#define PIN_MIC_DIN      6
-
-#define PIN_AMP_BCLK     15
-#define PIN_AMP_LRC      16
-#define PIN_AMP_DOUT     7
-
-/* 按键：果云开发板上自带的 BOOT 键就是 GPIO0，一头接 GND，按下 = 低电平。
- * 用它的好处是不用额外接线；代价是**开机时按住会进下载模式**——
- * 正常使用（上电之后再按）没影响。
- * 想用面包板上另外那颗 6*6 轻触开关的话，把它接到任意空闲 GPIO（比如 1），
- * 然后把下面这行改掉。 */
-#define PIN_BTN          0
-
-#else
-#error "BOARD_PROFILE 只能是 BOARD_WANGXUN 或 BOARD_GOOUUU"
-#endif
 
 #define BTN_FORCE_MS     10000   /* 室内模式：按住/按一下强制开麦 10 秒 */
 

@@ -208,20 +208,18 @@ pin1  3.3V     （该座每针约 1A，只能走信号，不能给舵机供电�
 自动下载靠 Q2/Q3 两个 SS8050 + DTR/RTS 时序。万一进不去下载模式，
 因为 ESP32 模块是**排针装配**的，可以直接把模块的 **IO0 脚短接到 GND**，再按一次"重启"。
 
-#### 3.2.2 第二块板：果云版 42 引脚开发板 + 面包板（照小智 AI 教程接线）
+#### 3.2.2 第三套：果云版 42 引脚开发板 + 面包板（`firmware/e1-breadboard`）
 
 另一套硬件：**GOOUUU 果云版 ESP32-S3-DevKitC-1（42 引脚）+ 面包板**，
 接线照小智 AI 那份面包板教程的 2.2 节（[飞书文档](https://my.feishu.cn/wiki/EH6wwrgvNiU7aykr7HgclP09nCh)，
 注意看 2.2「GOOUUU 果云版 42 IO 引脚」和 2.3.2，别拿 2.1 的标准版 44 引脚那张图）。
 
-同一套固件两块板都能跑，**差别只在 `main/config.h` 的 `BOARD_PROFILE`**：
+它有**自己的工程** `firmware/e1-breadboard`（从 `d8-mqtt-audio` 复制出来的完整一套：
+MQTT 上下行音频、本地人声门限、室内/随身两种模式，能力一模一样）。
+两块板互不影响，代价是**改功能要两边同步** —— 想只改一处就别改这个结构，
+回到 d8 里加板型开关。
 
-```c
-#define BOARD_PROFILE   BOARD_WANGXUN   // 现有语音板（默认）
-#define BOARD_PROFILE   BOARD_GOOUUU    // 果云版面包板
-```
-
-| 功能 | wangxun 语音板 | 果云版面包板 | 说明 |
+| 功能 | wangxun 语音板（`d8-mqtt-audio`） | 果云版面包板（`e1-breadboard`） | 说明 |
 |---|---|---|---|
 | INMP441 SCK (BCLK) | GPIO **4** | GPIO **5** | ⚠️ 和 WS 交叉 |
 | INMP441 WS | GPIO **5** | GPIO **4** | ⚠️ |
@@ -230,7 +228,7 @@ pin1  3.3V     （该座每针约 1A，只能走信号，不能给舵机供电�
 | MAX98357 LRC (WS) | GPIO 17 | GPIO **16** | |
 | MAX98357 DIN | GPIO 15 | GPIO **7** | 教程里写的是 `G7_DIN` |
 | 送话按键 | IO1（板上自带） | GPIO **0**（板上 BOOT 键） | 果云板没别的按键，用 BOOT 最省事 |
-| OLED SDA / SCL | 12/11/…（SPI 屏） | **41 / 42**（I2C 屏） | 本固件不驱动屏幕 |
+| 主题前缀 | `whale-1bb62897` | `whale-8f2a5c31` | ⚠️ **两条板同时在线必须不同**，否则 PC 同时收到两路 |
 
 面包板侧的接法（教程 2.2 节那两张图的意思）：
 
