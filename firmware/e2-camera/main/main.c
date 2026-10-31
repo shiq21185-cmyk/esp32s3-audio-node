@@ -39,6 +39,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+
+#include "cam_reg.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 #include "sensor.h"
@@ -175,7 +177,6 @@ static bool wifi_start(void)
 /* ---------------- MQTT ---------------- */
 static esp_mqtt_client_handle_t s_mqtt;
 static volatile bool s_mqtt_ok;
-
 static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
@@ -205,6 +206,49 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             bool on = (strstr(cmd, "1") != NULL);
             if (s && s->set_colorbar) s->set_colorbar(s, on ? 1 : 0);
             ESP_LOGI(TAG, "内置彩条 => %s", on ? "开" : "关");
+        } else if (strncmp(cmd, "REG", 3) == 0) {
+            /* REG 15 02      写一个寄存器
+             * REG 15         读一个寄存器
+             * DUMP           把关键寄存器全读一遍 */
+            unsigned r = 0, v = 0;
+            if (sscanf(cmd, "REG %x %x", &r, &v) == 2) {
+                if (cam_reg_write((uint8_t)r, (uint8_t)v) == 0) {
+                    ESP_LOGI(TAG, "写 %02X = %02X 成功", r, v);
+                }
+            } else if (sscanf(cmd, "REG %x", &r) == 1) {
+                /* 只读 */
+            } else {
+                r = 0xFFFF;
+            }
+            if (r != 0xFFFF) {
+                uint8_t got = 0;
+                if (cam_reg_read((uint8_t)r, &got) == 0) {
+                    ESP_LOGI(TAG, "回读 %02X = %02X", r, got);
+                }
+            }
+        } else if (strncmp(cmd, "DUMP", 4) == 0) {
+            /* 把几个关键寄存器读回来。这在本仓以前做不到 ——
+             * esp32-camera 的 ov7670 驱动没实现 get_reg（NULL 指针）。 */
+            static const uint8_t regs[] = {
+                0x11, /* CLKRC   内部时钟分频 */
+                0x12, /* COM7    输出格式 / 分辨率 */
+                0x13, /* COM8    AGC/AEC/AWB 使能 */
+                0x15, /* COM10   PCLK/HREF/VSYNC 极性 */
+                0x17, 0x18, 0x32, /* HSTART/HSTOP/HREF */
+                0x19, 0x1A, 0x03, /* VSTART/VSTOP/VREF */
+                0x1E, /* MVFP    镜像/翻转 */
+                0x3A, /* TSLB    输出顺序 */
+                0x40, /* COM15   输出范围/RGB565 */
+                0x70, 0x71, 0x72, 0x73, 0xA2, /* SCALING_* */
+                0x0C, 0x3E, /* COM3 / COM14（DCW 缩放） */
+                0x0D, /* COM4    PLL */
+            };
+            for (unsigned i = 0; i < sizeof(regs); i++) {
+                uint8_t got = 0;
+                if (cam_reg_read(regs[i], &got) == 0) {
+                    ESP_LOGI(TAG, "  %02X = %02X", regs[i], got);
+                }
+            }
         }
     }
 }
@@ -249,6 +293,96 @@ static uint8_t *grab_jpeg(size_t *len)
     }
     return buf;
 }
+
+/* ---------------- 串口命令通道 ----------------
+ * 只插 USB 线就能调参：不用 MQTT、不用反复重烧。
+ *   REG xx yy    写一个寄存器（并回读）
+ *   REG xx       只读一个寄存器
+ *   DUMP         把关键寄存器全读一遍
+ *   MODE qvga|vga  切分辨率
+ *   RATE msl     改推帧间隔（毫秒）
+ *   HELP         打这份说明
+ *
+ * 为什么要它：调 OV7670 是在"改一个值看一眼"的循环里找出路，
+ * 每次重烧要好几分钟，而这个循环要跑几十次。
+ */
+static volatile int s_uart_rate_ms = 120;   /* 921600 baud ≈ 92KB/s，一帧 ~12KB ⇒ 7fps 够用 */
+
+static void uart_line(const char *cmd)
+{
+    unsigned r = 0, v = 0;
+
+    if (strncmp(cmd, "REG", 3) == 0) {
+        if (sscanf(cmd, "REG %x %x", &r, &v) == 2) {
+            if (cam_reg_write((uint8_t)r, (uint8_t)v) == 0) {
+                ESP_LOGW(TAG, "写 %02X = %02X", r, v);
+            } else {
+                ESP_LOGW(TAG, "写 %02X = %02X 失败", r, v);
+            }
+        } else {
+            if (sscanf(cmd, "REG %x", &r) != 1) return;
+        }
+        uint8_t got = 0;
+        if (cam_reg_read((uint8_t)r, &got) == 0) {
+            ESP_LOGW(TAG, "回读 %02X = %02X", r, got);
+        }
+    } else if (strncmp(cmd, "DUMP", 4) == 0) {
+        static const uint8_t regs[] = { 0x11, 0x12, 0x13, 0x15, 0x17, 0x18,
+                                        0x32, 0x19, 0x1A, 0x03, 0x1E, 0x3A,
+                                        0x40, 0x0C, 0x3E, 0x0D, 0x70, 0x71,
+                                        0x72, 0x73, 0xA2, 0xB0, 0x6F };
+        for (unsigned i = 0; i < sizeof(regs); i++) {
+            uint8_t got = 0;
+            if (cam_reg_read(regs[i], &got) == 0) {
+                ESP_LOGW(TAG, "  %02X = %02X", regs[i], got);
+            }
+        }
+    } else if (strncmp(cmd, "RATE", 4) == 0) {
+        int ms = 0;
+        if (sscanf(cmd, "RATE %d", &ms) == 1 && ms >= 0 && ms <= 5000) {
+            s_uart_rate_ms = ms;
+            ESP_LOGW(TAG, "推帧间隔 => %d ms", ms);
+        }
+    } else if (strncmp(cmd, "MODE", 4) == 0) {
+        sensor_t *s = esp_camera_sensor_get();
+        if (!s || !s->set_framesize) return;
+        if (strstr(cmd, "vga")) {
+            s->set_framesize(s, FRAMESIZE_VGA);
+            ESP_LOGW(TAG, "分辨率 => VGA 640x480");
+        } else {
+            s->set_framesize(s, FRAMESIZE_QVGA);
+            ESP_LOGW(TAG, "分辨率 => QVGA 320x240");
+        }
+    } else if (strncmp(cmd, "HELP", 4) == 0) {
+        ESP_LOGW(TAG, "REG xx yy | REG xx | DUMP | MODE qvga|vga | RATE ms | HELP");
+    }
+}
+
+static void uart_cmd_task(void *arg)
+{
+    char line[64];
+    int n = 0;
+
+    while (1) {
+        int c = fgetc(stdin);
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            if (n > 0) {
+                line[n] = 0;
+                uart_line(line);
+                n = 0;
+            }
+            continue;
+        }
+        if (n < (int)sizeof(line) - 1) {
+            line[n++] = (char)c;
+        }
+    }
+}
+
 
 /* ---------------- UART 发 JPEG ----------------
  * 数据线直传，不依赖网络。PC 端用 tools/cam_grab.py 收。
@@ -349,6 +483,23 @@ void app_main(void)
         ESP_LOGI(TAG, "PID=0x%02X VER=0x%02X", s->id.PID, s->id.VER);
         if (s->set_colorbar) s->set_colorbar(s, 0);
 
+        /* 打开寄存器直通（esp32-camera 的 ov7670 没实现 set_reg/get_reg，
+         * 想调寄存器只能自己走 I2C）。失败不影响出图，只影响调试。 */
+        cam_reg_init();
+
+        /* 把初始化后的寄存器状态打一遍 —— 排查"每行只有一个采样值"
+         * 需要知道芯片真正在什么模式下跑，而不是我们以为它是什么模式。 */
+        static const uint8_t dump0[] = { 0x11, 0x12, 0x13, 0x15, 0x17, 0x18,
+                                         0x32, 0x19, 0x1A, 0x03, 0x1E, 0x3A,
+                                         0x40, 0x0C, 0x3E, 0x0D, 0x70, 0x71,
+                                         0x72, 0x73, 0xA2 };
+        for (unsigned i = 0; i < sizeof(dump0); i++) {
+            uint8_t got = 0;
+            if (cam_reg_read(dump0[i], &got) == 0) {
+                ESP_LOGI(TAG, "  寄存器 %02X = %02X", dump0[i], got);
+            }
+        }
+
         /* BAND 试验：把 COM10 的 PCLK 改成"只在 HREF 有效期间输出"。
          * 现在 PCLK 是自由振荡（COM10_PCLK_FREE），若模块的 PCLK 与 HREF
          * 相对相位不对，行内就会整片错位 —— 症状正是"每行只有末尾几个像素对"。
@@ -387,6 +538,9 @@ void app_main(void)
 
     mqtt_start();
 
+    /* 串口命令通道：只插 USB 线就能调寄存器（不依赖 MQTT） */
+    xTaskCreate(uart_cmd_task, "uartcmd", 4096, NULL, 3, NULL);
+
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, ">>> 等 MQTT 连上后，电脑端发 SNAP 就能取一张 <<<");
     ESP_LOGI(TAG, "    tools/cam_view.py --loop   可以一直看");
@@ -411,12 +565,11 @@ void app_main(void)
             }
         }
 
-        /* UART 一直推：1 秒一帧。不需要任何指令，插着 USB 线就能看。
-         * 断网也能用 —— 这是最可靠的调试通路。 */
+        /* UART 一直推：默认 120ms 一帧（921600 baud ≈ 92KB/s）。
+         * 不需要任何指令，插着 USB 线就能看。断网也能用 —— 最可靠的调试通路。
+         * 想改节奏：串口发 `RATE 40`（更快）或 `RATE 1000`（更慢）。 */
         int64_t now2 = esp_timer_get_time();
-        /* 115200 baud ≈ 11.5KB/s，一帧 320x240/q60 约 10~14KB，
-         * 所以最快也就 1 秒一帧。想更快就把波特率提到 921600（见 sdkconfig）。 */
-        if (now2 - last_uart_us > 900000) {
+        if (s_uart_rate_ms > 0 && now2 - last_uart_us > (int64_t)s_uart_rate_ms * 1000) {
             last_uart_us = now2;
             uart_send_jpeg();
         }
