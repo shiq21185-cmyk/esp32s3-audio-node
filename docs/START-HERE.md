@@ -95,7 +95,16 @@ rot/
 │  ├─ START-HERE.md   交接（本文件）
 │  ├─ BODY-PLAN.md    战略
 │  └─ BODY-BUILD.md   施工手册
-├─ firmware/          ESP-IDF 工程（待建）
+├─ firmware/          ESP-IDF 工程
+│  ├─ d1..d8          TTL 总线版（d8 = 集成板基线）
+│  ├─ e1-breadboard   果云版 42 脚面包板（语音/屏幕，主力）
+│  ├─ e3-ref          OV7670 能出图的最小参考（UART 推裸 RGB565，已退休）
+│  ├─ e4-ov2640       OV2640 版（UART + Wi-Fi + MQTT 三路推流，纯摄像头）
+│  ├─ e5-body-cam     ⭐ 主力：e1 的语音+屏幕 + OV2640 眼睛（同一个固件）
+│  └─ e2-camera       最初自己写的 OV7670 + MQTT/JPEG 工程（保留）
+├─ tools/cam_jpeg.py  串口抓 JPEG 帧（e4 配套）
+├─ tools/cam_mqtt.py  MQTT 实时预览（`http://127.0.0.1:8765/`）
+├─ tools/body_camera.py  按一下拍一张（给"她"用的拍照入口）
 └─ pc/                PC 侧草稿（mcp-body.js / mock 设备）
 ```
 

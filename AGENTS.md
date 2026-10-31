@@ -135,6 +135,123 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
               ③ 控制台「身体·连接」前缀仍是 d8 的 whale-1bb62897；
               ④ `body_say` 还没在 e1 上验；⑤ e1 喇叭听感待确认。
 
+2026-10-31  📷 摄像头支线：OV7670 放弃，换 OV2640（模块未到，固件/工具/文档已备好）
+            · 起因（m00002）：「ov7670代码怎么一直实现不了，直接去找别人的代码先把我的跑起来」
+              ⇒ 抄 llcircle/esp32s3_ov7670_wifi 成 `firmware/e3-ref`（UART 推裸 RGB565）。
+            · 三个真凶（全部实测，别再回头试）：
+              ① **RESET 悬空**：模块无上拉，悬空 = 芯片随机复位 ⇒ 寄存器读出来全是上电默认值
+                 （COM7=0x00 而不是 0x04），串口刷 FB-OVF，电气测量却全正常。
+                 接回 GPIO48（`CAM_PIN_RESET=48`）后寄存器立刻留住。填 `-1` 是错的。
+              ② **QVGA 不能用**：驱动靠 DCW 降采样（COM3:04 / COM14:19 / DCWCTR:11 / PCLK_DIV:F1），
+                 RGB565 下退化成"整行一个颜色"（240 行完全一样）；但内置彩条 8 条全对
+                 ⇒ 数字通路没问题，坏在模拟/降采样。改 `FRAMESIZE_VGA` 才出真图。
+              ③ **PCLK 太快**：VGA 满屏彩色雪花。扫 CLKRC(0x11) 的"相邻像素平均绝对差"：
+                 0x00=1684 / 0x01=1346 / **0x02=535** / 0x03=705 ⇒ 面包板杜邦线只稳到 ~4MHz PCLK。
+                 `CLKRC=0x02` 后三帧互相关 0.93~0.97、平均绝对差 9.4（此前 43）。
+            · 剩下的毛病：row 357–358 固定横向断口（按 960 字节重排是斜向撕裂 ⇒ 1280 字节/行是对的）、
+              颜色脏、噪点重。主人（m00219）拍板：「我感觉效果太差了，我之后准备换成 ov2640 的」。
+            · 已备好（模块到货即可烧）：`firmware/e4-ov2640`（从 e3 复制）——
+              同引脚（D0..D7=8,9,10,11,12,13,14,17 / XCLK=18 / PCLK=21 / VSYNC=38 / HREF=39 /
+              SIOC=40 / SIOD=1 / RESET=48 / PWDN=GND），XCLK 20MHz、**PIXFORMAT_JPEG**、VGA、
+              q=12、fb_count=2、GRAB_LATEST；UART 帧 `META,JPEG,<len>\n` + JPEG + `\nEND\n`；
+              命令 REG/BANK/RATE/PUSH/HELP；去掉 Wi-Fi。build ✅ `e4_ov2640.bin` 0x57a20（分区剩 77%）。
+              · 丝印别名：**`DCLK` = PCLK**（接 21）；模块自带晶振时没有 XCLK/MCLK，
+                把那根线空着 + `main.c` 的 `E4_MODULE_HAS_OWN_OSC` 改 1（`pin_xclk=-1`，
+                驱动 `driver/esp_camera.c:186` 会整段跳过 XCLK 输出）。`NC` 不接。
+            · 工具：`tools/cam_jpeg.py`（`--probe` 只看启动日志；默认抓 3 帧存 `.tmp/cam/jpeg/`）。
+            · 换型手册：`docs/OV2640-换型准备.md`（接线表 / 参数 / 排障表 / OV7670 复盘）。
+            · ✅ **实物通了（2026-10-31 15:4x，红色 1688 模块）**：
+              用供应商《引脚说明》定的表：`1 GND / 2 VCC3.3 / 3 SCL / 4 VSYNC / 5 SDA / 6 HREF /
+              7 D0 / 8 RESET / 9..14 D1..D6 / 15 PCLK(DCLK) / 16 D7 / 17 PWDN / 18 NC` ——
+              **RESET 夹在 D0 和 D1 中间、PWDN 在 D7 与 NC 之间**，这两个位置是接错的重灾区；
+              PWDN 高有效，必须接 GND。原理图里 **Y1 = 12.000MHz 有源晶振** 直供 `OV_XCLK`
+              ⇒ `E4_MODULE_HAS_OWN_OSC 1`（GPIO18 空着）；U1 `XC6219B132MR` 5V→3.3V、
+              U2 `RT9193-2.8` → VCC2.8，所以排针的 VCC3.3 只能给 3.3V，别接 5V。
+              启动日志：`Camera PID=0x26 VER=0x42 MIDL=0x7f MIDH=0xa2` → Detected OV2640；
+              预热帧 640x480 JPEG 11325 / 12448 字节，运行中帧长 10.8KB。
+              ⚠️ 这是**定焦**模块（约 40cm 最近），拿在手里怼桌面拍就是一片糊；要验画质必须对着 0.4~1m 外的物体。
+            · ⚡ 帧率（用户问"怎么这么卡"，三个数都是实测）：
+              ① 固件原来 `s_rate_ms = 200`（每帧后 vTaskDelay 200ms）—— 这是**人为**的瓶颈，
+                 占了一帧时间的 2/3，实测只有 **3.4 fps**。改成默认 0（`RATE 0` 也放行了）后 **8.3 fps**。
+              ② 串口 921600 → 一帧 10.8KB 要 117ms，正好卡住 8.3fps ⇒ 调 **1,500,000** 后 **9.9 fps**。
+              ③ 2,000,000 试过：**大量丢字节**（SOI/EOI 校验失败、帧率掉到 0.8fps），CH340 撑不住，退回 1.5M。
+              现在传输 72ms/帧、总 100ms/帧 ⇒ **瓶颈已经回到传感器出帧本身（约 100ms）**，
+              再快只能降分辨率（QVGA 帧约 3KB、像素 1/4）。
+            · 实时预览：`tools/cam_stream.py` → `http://127.0.0.1:8765/`（MJPEG，`/snap.jpg` 单帧、`/stats` JSON）。
+              串口独占：它跑着的时候 `cam_jpeg.py` 打不开 COM4，烧录前必须先停。
+            · 还没做：① `e3-ref` 留着当"OV7670 能出图的最小参考"；② 拍照还没接进 body_say/MQTT；
+              ③ 画质/焦距还没在"正经被拍对象"上确认过（目前只验了"能出真实 JPEG"）。
+
+2026-10-31  ⭐ 并进身体：`firmware/e5-body-cam`（e1 的耳朵+嘴+屏幕 + OV2640 眼睛，同一个固件）
+            · 用户（m01114）：「现在接入我原来的项目，给rot补充完整」⇒ 两层都做：
+              PC 层拍照入口 `tools/body_camera.py` + 固件合并 e5。**接线一根没改**
+              （音频 4/5/6/7/15/16、屏幕 41/42、按键 0；摄像头 1/8..14/17/18/21/38/39/40/48）。
+            · 主题（和 e1 共用一个前缀 `whale-8f2a5c31`，同一个 MQTT 连接）：
+                <base>/cam/jpeg  板→PC   JPEG 原始字节（VGA 640x480，一帧 10~14KB）
+                <base>/cmd        PC→板   文本：CAM SNAP / CAM STREAM 0|1 / CAM RATE ms /
+                                          CAM SIZE VGA|QVGA|SVGA|UXGA / CAM QUAL 0-63 / CAM INFO
+              `CAM SNAP` 拍一张就发（默认不常驻推流，省 EMQX 1GB/月）。
+            · 🔴 **踩坑：I2C 驱动冲突，开机 995ms panic**，日志只有
+                `E i2c: CONFLICT! driver_ng is not allowed to be used with this old driver`
+              根因：OLED 走 esp_lcd（driver_ng，`oled.c` 的 `i2c_new_master_bus`），
+              esp32-camera 2.1.8 在 IDF 5.3 上仍走老 `driver/i2c`（`sccb.c` 的 `i2c_driver_install`），
+              而老驱动的 `__attribute__((constructor))` 一发现 driver_ng 就 `abort()` ——
+              编译期看不出来，**开机就死**。地址 0x42051be7 可 `addr2line` 到
+              `components/driver/i2c/i2c.c:1738 check_i2c_driver_conflict`。
+              解法（已落进 e5 的 `sdkconfig` 和 `sdkconfig.defaults`）：
+                `CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y`
+              两个驱动各用各的端口（屏幕 I2C0 / 摄像头 SCCB I2C1），互不相干。
+              ⚠️ 别想着改 esp32-camera 的 CMake 用 `sccb-ng.c`：那条路只在 IDF ≥5.4 能编，
+                 5.3 上它 include `esp_private/i2c_platform.h` 直接 fatal error。
+            · 🔴 **踩坑：JPEG 模式运行期改分辨率 = 死**：`set_framesize()` 返回 0，但之后
+              `cam_hal: Failed to get frame: timeout` 一帧都出不来（e4 上也一样）。
+              现在 `eye_set_size()` 改完会 `esp_camera_deinit()` + 重新 `eye_init()`（沿用新尺寸）。
+            · ⚠️ 函数名坑：esp32-camera 内部已经有 `cam_init()`，咱的再叫这个名字会
+              `multiple definition`（链接期才炸）。e5 里统一叫 `eye_init/eye_grab/eye_release/
+              eye_set_size/eye_size_name/eye_set_quality`。
+            · 📊 实测（2026-10-31 17:1x，VGA q12，RSSI -55~-60）：
+              拍照：`CAM SNAP` → 一帧 11KB 左右，**1 秒内落地**；
+              连续推流：VGA **1.3~2.7fps**（视网络抖动）、QVGA 2.3fps，
+              板侧自报「平均取帧 180~880 ms / 发布 240~900 ms」——
+              吞吐上限约 **14 KB/s ≈ 1 个 MSS/往返**，怀疑是 ACK 停顿不是带宽；
+              音频同时照跑：mic 轮 83/5s、`gap 0.0ms`、喇叭下行 `ddrop 0`（互不干扰已验）。
+            · PC 侧入口（她要用就直接跑这条，返回 JSON + 文件路径）：
+                python tools/body_camera.py --base whale-8f2a5c31 --json
+              它同时往 `<base>/cam/cmd` 发 `SNAP`（e4 固件听）和 `<base>/cmd` 发 `CAM SNAP`（e5 听），
+              所以换回 e4 也不用改脚本。
+              ✅ 2026-10-31 17:3x 改过：**不带 `--base` 也能拍** —— 控制台配置那个前缀
+                （d8 的 `whale-1bb62897`）和 e1/e5 的 `whale-8f2a5c31` 会**同时订阅+同时请求**，
+                哪块板在线就收哪块。实测 `python tools/body_camera.py --json` 直接出图。
+                要指定仍然可以 `--base xxx`。
+            · 实时预览（开发用）：`python tools/cam_mqtt.py --stream 1 --rate 0` → `http://127.0.0.1:8765/`
+            · 📶 **带出门要能上网**（2026-10-31 17:2x 加）：板子只需连上任何有网的 Wi-Fi
+              （走云端 EMQX，**不需要和 PC 同一个网段、不需要插着 USB**）。
+              多 Wi-Fi 列表在 `firmware/e5-body-cam/main/secrets.h`：
+                #define WIFI_AP_LIST \
+                    { WIFI_SSID, WIFI_PASS },      /* 家里 TP-LINK_5D90 */ \
+                    { "xwb", "xwb123456" },        /* 主人手机热点 */
+              行为：按列表顺序试，**每个名字只试 2 次就换下一个**（实测一次切换 2.5~3.5 秒，
+              带出门 10 秒内就轮到热点）；连上后日志写清**用的是哪个网**
+              （`Wi-Fi 通了，本机 IP = 192.168.1.105（网络："TP-LINK_5D90"）`）；
+              30 秒全失败会 `esp_wifi_scan_start` 扫一遍并打出附近 Wi-Fi（名字/rssi/信道），
+              出门没串口也能从下次开机的日志判断是名字错、5GHz、还是不在范围。
+              ✅ 实测（2026-10-31 17:4x）：家里网那次没连上，板子自动切到 **"xwb"**、
+                拿到 **192.168.43.56**（安卓热点网段），`Camera PID=0x26`、broker 也连上；
+                下一次开机又切回家里网 192.168.1.105 —— 两个方向都验过。
+              🔴 **两个会把板子挂死的写法**（都踩过，别再加回去）：
+                ① 在 `WIFI_EVENT_STA_START` 事件任务里调阻塞的 `esp_wifi_scan_start()`
+                   ⇒ 事件循环堵死，日志只重复"正在连 Wi-Fi"、无限重启；
+                ② 在 `esp_wifi_start()` 之后紧接着扫 ⇒ 日志停在 `enable tsf`，不 panic 也不重启，纯挂住。
+                所以现在是**不扫描、直接按列表连**，只有 30 秒全失败时才扫（那是给人看的诊断）。
+              ⚠️ 只能 2.4GHz：手机热点要把"5GHz/最大兼容性"关掉。
+            · ⚠️ 串口日志波特率**两个工程不一样**：e4 = 1500000，e5 = **115200**（e1 的老配置）。
+              抓 e5 日志别用 e4 那个 1.5M，会读到一堆 0x00。烧录本身固定 `-b 921600`。
+            · 还没定：没网时 `wifi_connect()` 失败会让 `app_main` 直接 return（屏幕/麦克风都不跑）。
+              要不要做"离线模式"（点亮屏幕、耳朵照跑、只是不能连云）—— 用户说"之后再说"。
+            · 还没做：① 帧率被吞吐卡住，值得查一次（先试把 cam_task 单独跑、再试在 e5 上关掉
+              屏幕 UI 对比）；② 拍照还没做成"她在 QQ 里说一声就发照"的闭环
+              （路子：DSH 跑 `tools/body_camera.py` 拿路径 → `qq_send_file`）。
+
 
 2026-10-24 ~ 2026-10-28 的全部逐日记录（D1~D8、Opus、喇叭缓冲、state 截断、
 opus 编码器 drain、QQ↔身体、记忆双档……所有踩坑与验证数字）已搬到

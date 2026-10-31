@@ -1,0 +1,12 @@
+## 依赖清单（ESP-IDF 组件管理器）
+##
+## esp_audio_codec 是乐鑫官方的编解码器库，里面带 Opus 编/解码的
+## **预编译静态库**（lib/esp32s3/libesp_audio_codec.a）。用它而不是自己
+## 移植 libopus：省掉一份 300KB+ 的源码和三天的移植工作，而且有 SIMD 优化。
+##
+## ⚠️ 许可证：头文件是 "Espressif Modified MIT" —— 只能跟乐鑫芯片一起用，
+##    不能把那两个 .a 拷到别家板子的仓库里发布。本项目就是 ESP32-S3，合规。
+dependencies:
+  idf: ">=5.0"
+  espressif/esp_audio_codec: "^2.6.2"
+  espressif/esp32-camera: "^2.0.0"

@@ -107,20 +107,16 @@ static camera_config_t make_config(void)
         .pin_href  = CAM_HREF,
         .pin_pclk  = CAM_PCLK,
 
-        .xclk_freq_hz = 16000000,
+        .xclk_freq_hz = 24000000,
         .ledc_timer   = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
 
-        /* 🔴 2026-10-31 换成 GRAYSCALE 做对照实验：
-         * RGB565（每点 2 字节）抓到的图是"每行前 312 个像素完全恒定、
-         * 只有最后 8 个像素有内容"—— 这形状像字节流错位，不像传感器坏。
-         * GRAYSCALE 每点 1 字节，正好用来区分"字节数/错位"和"模拟通路"。 */
         .pixel_format = PIXFORMAT_RGB565,
         .frame_size   = FRAMESIZE_QVGA,
         .jpeg_quality = 12,
         .fb_count     = 2,
         .fb_location  = CAMERA_FB_IN_PSRAM,
-        .grab_mode    = CAMERA_GRAB_LATEST,
+        .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
     };
     return c;
 }
@@ -519,6 +515,20 @@ void app_main(void)
          * ⇒ 增益和曝光确实能改变亮度，说明"光→感光→ADC"这条通路是活的；
          *   但每一行内部仍然是同一个值 —— 也就是**有光进来，只是一行只给出一个采样**。
          * 现在恢复自动曝光/增益，做正常采集。 */
+        /* ===== 2026-10-31 起：不写任何自定义寄存器 =====
+         *
+         * 依据 llcircle/esp32s3_ov7670_wifi（ESP32-S3 + 不带 FIFO 的 OV7670，
+         * 走 esp32-camera 组件，README 明说"能出图，只是不太清晰"）。
+         * 它的 main.c 里**一个寄存器都没写**，全靠驱动默认值。
+         *
+         * 我们之前几十轮把默认值改了一大堆（CLKRC/COM4/COM10/DCW/
+         * frameControl...），每一处都"看着有道理"，但组合起来没人验证过
+         * 整体是好是坏 —— 结果一路把基线改离了"能用"的状态。
+         * 现在全部撤掉，回到驱动默认。以后再动寄存器，前提是先用默认值
+         * 拿到一张可辨认的图当基线，并且一次只改一个字节、改完能回滚。
+         *
+         * 唯一的例外是 RESET：这块板的 RESET 接在 GPIO48 上，
+         * pin_reset=-1 时没人驱动它，低有效就一直复位（表现为读不到 PID）。 */
         if (s->set_gain_ctrl)     s->set_gain_ctrl(s, 1);
         if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
         if (s->set_whitebal)      s->set_whitebal(s, 1);
