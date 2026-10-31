@@ -19,6 +19,7 @@
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -27,8 +28,18 @@ import paho.mqtt.client as mqtt
 
 DEFAULT_BROKER = "i1e78188.ala.cn-hangzhou.emqxsl.cn"
 DEFAULT_PORT = 8883
-DEFAULT_USER = "whale"
-DEFAULT_PASS = "REDACTED-SEE-CONFIG"
+# 账号密码不写死在源码里（这个仓库是公开的）：优先命令行参数，
+# 其次环境变量 BODY_MQTT_USER / BODY_MQTT_PASS，最后读 tools/body_config.py 的配置。
+def _default_creds():
+    try:
+        import body_config
+        return body_config.credentials()
+    except Exception:
+        return (os.environ.get("BODY_MQTT_USER", ""),
+                os.environ.get("BODY_MQTT_PASS", ""))
+
+
+_DEF_USER, _DEF_PASS = _default_creds()
 DEFAULT_BASE = "whale-8f2a5c31"
 
 
@@ -36,8 +47,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--broker", default=DEFAULT_BROKER)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--user", default=DEFAULT_USER)
-    ap.add_argument("--password", default=DEFAULT_PASS)
+    ap.add_argument("--user", default=_DEF_USER)
+    ap.add_argument("--password", default=_DEF_PASS)
     ap.add_argument("--base", default=DEFAULT_BASE, help="主题前缀，要和固件一致")
     ap.add_argument("--save", default=r".tmp\cam\live.jpg", help="存到哪个文件")
     ap.add_argument("--snap", action="store_true", help="发 SNAP 抓一张")

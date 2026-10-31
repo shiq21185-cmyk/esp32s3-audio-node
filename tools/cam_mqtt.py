@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import ssl
 import sys
 import time
@@ -32,8 +33,18 @@ import cam_wifi as W  # noqa: E402  复用同一个网页/数据槽
 
 DEFAULT_BROKER = "i1e78188.ala.cn-hangzhou.emqxsl.cn"
 DEFAULT_PORT = 8883
-DEFAULT_USER = "whale"
-DEFAULT_PASS = "REDACTED-SEE-CONFIG"
+# 账号密码不写死在源码里（这个仓库是公开的）：优先命令行参数，
+# 其次环境变量 BODY_MQTT_USER / BODY_MQTT_PASS，最后读 tools/body_config.py 的配置。
+def _default_creds():
+    try:
+        import body_config
+        return body_config.credentials()
+    except Exception:
+        return (os.environ.get("BODY_MQTT_USER", ""),
+                os.environ.get("BODY_MQTT_PASS", ""))
+
+
+_DEF_USER, _DEF_PASS = _default_creds()
 DEFAULT_BASE = "whale-8f2a5c31"
 
 
@@ -41,9 +52,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--broker", default=DEFAULT_BROKER)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--user", default=DEFAULT_USER)
-    ap.add_argument("--password", default=DEFAULT_PASS)
+    ap.add_argument("--user", default=_DEF_USER)
+    ap.add_argument("--password", default=_DEF_PASS)
     ap.add_argument("--base", default=DEFAULT_BASE)
+    ap.add_argument("--body", action="store_true",
+                    help="对端是 e5 身体固件：命令发到 <base>/cmd 且加 CAM 前缀")
+    ap.add_argument("--size", default=None, help="e5：CAM SIZE VGA|QVGA")
+    ap.add_argument("--qual", type=int, default=None, help="e5：CAM QUAL 0-63")
     ap.add_argument("--stream", type=int, default=None,
                     help="连上后发 STREAM 1 或 0")
     ap.add_argument("--rate", type=int, default=None, help="发 RATE <ms>")
@@ -55,7 +70,12 @@ def main() -> int:
     a = ap.parse_args()
 
     topic_jpeg = f"{a.base}/cam/jpeg"
-    topic_cmd = f"{a.base}/cam/cmd"
+    # e4（纯摄像头）命令在 <base>/cam/cmd，载荷是 "STREAM 1"；
+    # e5（身体）命令在 <base>/cmd，载荷是 "CAM STREAM 1"。
+    topic_cmd = f"{a.base}/cmd" if a.body else f"{a.base}/cam/cmd"
+
+    def body_cmd(text: str) -> str:
+        return f"CAM {text}" if a.body else text
 
     cli = mqtt.Client(client_id=f"camview-{int(time.time()) % 100000}",
                       callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -68,14 +88,18 @@ def main() -> int:
         print(f"[MQTT] 已连 broker（{rc}），订阅 {topic_jpeg}", flush=True)
         c.subscribe(topic_jpeg, qos=0)
         if a.snap:
-            c.publish(topic_cmd, "SNAP", qos=0)
+            c.publish(topic_cmd, body_cmd("SNAP"), qos=0)
         elif a.stream is not None:
             # QoS0 不保留：板子那一侧还没订阅完的话，这条会直接丢。
             # 所以连发几轮，直到第一帧到了为止（后台边收边发，见 main 里）。
             for _ in range(3):
+                if a.size:
+                    c.publish(topic_cmd, body_cmd(f"SIZE {a.size}"), qos=0)
+                if a.qual is not None:
+                    c.publish(topic_cmd, body_cmd(f"QUAL {a.qual}"), qos=0)
                 if a.rate is not None:
-                    c.publish(topic_cmd, f"RATE {a.rate}", qos=0)
-                c.publish(topic_cmd, f"STREAM {a.stream}", qos=0)
+                    c.publish(topic_cmd, body_cmd(f"RATE {a.rate}"), qos=0)
+                c.publish(topic_cmd, body_cmd(f"STREAM {a.stream}"), qos=0)
                 time.sleep(0.4)
 
     def on_message(c, u, msg):
