@@ -253,9 +253,15 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
                   主动要求和她自己觉得该拍了不在这个限制内」。
                 实现（`qq-bridge-deploy/src/bridge.js`）：
                   `noteConversationStart(key)` 挂在 `handleIncoming()` 的 `isOwner` 之后 ——
-                  只有**管理员私聊**、且距上一条消息超过 `CONV_GAP_MS`（默认 **20 分钟**，
-                  环境变量 `QQBRIDGE_CONV_GAP_MIN`）才算"新的一次对话"，这时异步起
+                  只有**管理员私聊**、且「已经聊完了」才算"新的一次对话"，这时异步起
                   `tools/body_camera.py --json -n 1 --timeout 12` 拍一张；
+                  「聊完了」怎么判：**直接用桥接自己的口径** —— `convGlanceGapMs()` 返回
+                  `quietGrantMs()`（默认 **2.5 分钟**，控制台「自由时间」栏 /
+                  `socialV2.autonomy.quietGrantMs` 可改，钳制 [10s, 60min]），
+                  再比会话状态里持久化的 `st.lastIncomingAt`：没过门槛 ⇒ 同一段对话不拍。
+                  ⚠️ 别自己另立一个"20 分钟"——`scheduleQuietAutonomy()` 的注释原话是
+                  「静默本身就证明"这段对话结束了"，比任何猜测都可靠」，桥接早就在算这件事。
+                  想单独给摄像头放宽/收紧：环境变量 `QQBRIDGE_CONV_GAP_MIN`（分钟）。
                   `takeConversationGlance(key)` 在拼 prompt 时把它作为 **image 内容块**
                   塞进这一轮（不是给路径 —— 给路径她只会说"我只有路径没画面"），最多等 6 秒，
                   超时就先回话、这张留给下一轮。一次对话只消费一张。
