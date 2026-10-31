@@ -224,6 +224,29 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
                 哪块板在线就收哪块。实测 `python tools/body_camera.py --json` 直接出图。
                 要指定仍然可以 `--base xxx`。
             · 实时预览（开发用）：`python tools/cam_mqtt.py --stream 1 --rate 0` → `http://127.0.0.1:8765/`
+            · 🔌 **USB 串口实时预览（调焦/摆机位专用，2026-10-31 晚加）**：
+                python tools\cam_uart_live.py --port COM4     # 然后  http://127.0.0.1:8765/
+              实测 **8~10fps、延迟约 0.1s**（一帧 17~22KB，1.5M 波特），比 MQTT 那条（2~4fps、
+              1~3s）清楚得多。Ctrl-C 会自动发 `CAM UART 0` 把板子切回 115200 控制台模式。
+              固件侧就是一条命令 `CAM UART 1|0`（串口或 `<base>/cmd` 都能发）：
+              开 → 先打 `BAUD 1500000` 再 `uart_set_baudrate()`，然后 `esp_log_level_set("*", NONE)`
+              （日志字节混进 JPEG 就废了）；关 → 恢复日志级别 + 波特率 115200 + `publish_state("cam")`。
+              推流期间 `uart_console_task` 只 delay 不读字节（**读一个字节就毁一帧**）。
+              🔴 两个必踩的坑：① 发二进制千万别用 `printf`/`fwrite(stdout)` —— stdio 是文本模式，
+                JPEG 里每个 `0x0A` 会被扩成 `0x0D 0x0A`，一帧凭空多几百字节，主机按 `META` 的长度
+                切永远找不到 `FFD9`（实测 declared 17584 / 实际 17689）；要用 `uart_write_bytes()`。
+                ② `"META,JPEG,"` 是 **10** 个字符，不是 8 —— 数错的话每帧 `ValueError` 被当坏帧丢掉，
+                现象是"板子好像没出图"，其实是解析器空转。
+              ⚠️ 它占着 COM4，**推流时不能烧板子**（`PermissionError(13)`）；换下一个之前先 `job_kill`。
+              ⚠️ 从 UART 模式切回 MQTT 后，板子可能长时间处于「和 broker 断开了，正在自动重连」，
+                `CAM SNAP` 会失败；**复位一次就好**。
+            · 🖥️ **控制台入口**（2026-10-31 晚加，`qq-bridge-deploy`）：
+                `src/bridge.js` 里 `camUartStart()` / `camUartStop()` / `camUartState()` +
+                `GET /api/body/cam-uart`、`POST /api/body/cam-uart/start|stop`；
+                `public/console.html` 的「身体 · 眼睛（USB 串口调试）」段有开始/停止/打开三个控件。
+                spawn 的是 `tools/cam_uart_live.py`，端口默认 COM4（`QQBRIDGE_CAM_SERIAL` 可改），
+                HTTP 默认 8765（`QQBRIDGE_CAM_PORT` 可改）。改完要**重新点一次「一键启动」**才生效
+                （launch-all.ps1 没有重启循环，桥接一退就没了，别在运行中自己 restart）。
             · 📶 **带出门要能上网**（2026-10-31 17:2x 加）：板子只需连上任何有网的 Wi-Fi
               （走云端 EMQX，**不需要和 PC 同一个网段、不需要插着 USB**）。
               多 Wi-Fi 列表在 `firmware/e5-body-cam/main/secrets.h`：

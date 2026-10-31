@@ -157,6 +157,22 @@ CAM INFO           打印摄像头状态
 
 `e4` 还有一条**板载网页**（`http://<板子IP>/`、`/stream`、`/snap.jpg`），只在同网段时能用。
 
+### e5 的串口实时预览（调焦 / 摆机位专用）
+
+`tools/cam_uart_live.py` —— 板子用 USB 插在这台电脑上时用：
+
+```powershell
+python -u tools\cam_uart_live.py --port COM4      # 然后开 http://127.0.0.1:8765/
+```
+
+实测 **8~10 fps**（一帧 17~22KB，1.5M 波特），延迟 ~0.1 秒，比 MQTT 那条清楚得多，
+调焦距、看机位就靠它。结束按 Ctrl-C：脚本会发 `CAM UART 0` 把板子切回 115200 控制台模式。
+
+固件那边就是一条命令 `CAM UART 1|0`（串口或 `<base>/cmd` 都能发），推流期间日志会被关掉，
+免得日志字节混进 JPEG。**它和烧录抢 COM4**，推流时不要烧板子。
+桥接控制台的「身体 · 眼睛」页也有开始/停止两个按钮（`src/bridge.js` 的
+`/api/body/cam-uart/*`），不用记命令。
+
 ---
 
 ## 已知的坑（都踩过，注释里写得更细）
@@ -168,6 +184,8 @@ CAM INFO           打印摄像头状态
 - **`NO-SOI - JPEG start marker missing`**：八成是接触问题（RESET 松、排线松），不是软件。
 - **Wi-Fi 别在事件任务里阻塞扫描**：`esp_wifi_scan_start()` 放进事件回调会把事件循环堵死，表现为无限重连或日志停在 `enable tsf`。开机就直接连，连不上再扫。
 - **OV7670 的教训**（`e2`/`e3` 留着）：QVGA 是 DCW 降采样做的，RGB565 下不可靠；PCLK 太快时 ESP32 采样不到稳定数据（表现为满屏雪花，降 `CLKRC` 到 XCLK/3 立刻干净）；内置彩条正常 ≠ 真实画面正常（彩条绕开镜头和 ADC）。
+- **别用 `printf`/`fwrite(stdout)` 发二进制**：stdio 是文本模式，JPEG 里每个 `0x0A` 会扩成 `0x0D 0x0A`，一帧凭空多出上百字节，主机按 `META` 里的长度切出来永远找不到 `FFD9`（实测 declared 17584 / 实际 17689）。要发裸数据就用 `uart_write_bytes()`。
+- **切帧别数错帧头的长度**：`"META,JPEG,"` 是 10 个字符，不是 8。数错的话每帧都 `ValueError` 被当坏帧丢掉，现象是"板子好像没出图"，其实是解析器空转。
 
 ---
 

@@ -43,6 +43,7 @@
 #include "nvs_flash.h"
 
 #include "driver/i2s_std.h"
+#include "driver/uart.h"
 #include "driver/gpio.h"
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
@@ -320,6 +321,10 @@ static esp_mqtt_client_handle_t s_mqtt;
  * 帧就发在 <base>/cam/jpeg 上，和 e4-ov2640 用同一个主题 ⇒ PC 侧
  * tools/body_camera.py、tools/cam_mqtt.py 不用区分是哪块板。 */
 static volatile bool s_cam_stream;
+/* 串口推流：本地看图用（不走云）。命令 CAM UART 1 / 0。
+ * MQTT 那条路一帧绕一次云，实测 2~4fps、延迟 1~3s，调焦距根本分不清对没对上；
+ * 串口 1.5M 能到 ~10fps。两条路别同时开（串口推流时日志全关）。 */
+static volatile bool s_cam_uart;
 static volatile int  s_cam_rate_ms = 0;      /* 推流间隔：0 = 能发多快发多快 */
 static volatile uint32_t s_cam_frames;       /* 累计发出去的帧数 */
 static volatile uint32_t s_cam_fail;         /* 取帧/发布失败的次数 */
@@ -426,6 +431,43 @@ static bool cam_publish_one(void)
     return true;
 }
 
+/* 把一帧直接从串口吐出去。格式和 e4 一样：
+ *     META,JPEG,<len>
+  +  裸 JPEG  +  
+END
+
+ * 不能用 printf 打二进制（JPEG 里有 0x00 会被截断），必须 fwrite。 */
+static bool cam_uart_one(void)
+{
+    if (!eye_ready()) return false;
+
+    int64_t t0 = esp_timer_get_time();
+    camera_fb_t *fb = eye_grab();
+    s_cam_grab_us += (uint32_t)(esp_timer_get_time() - t0);
+    if (!fb) {
+        s_cam_fail++;
+        return false;
+    }
+
+    int64_t t1 = esp_timer_get_time();
+    /* ⚠️ 必须走 uart_write_bytes，不能用 printf/fwrite(stdout)：
+     * stdio 那条路是「文本模式」，JPEG 里每个 0x0A 会被扩成 0x0D 0x0A，
+     * 一帧凭空多出上百字节，主机按 META 里的长度切出来就永远找不到 FFD9。
+     * 2026-10-31 实测：declared 17584 / 实际 17689，差值正好是帧内 0x0A 的个数。 */
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "META,JPEG,%u\n", (unsigned)fb->len);
+    uart_write_bytes(UART_NUM_0, hdr, hn);
+    uart_write_bytes(UART_NUM_0, (const char *)fb->buf, fb->len);
+    uart_write_bytes(UART_NUM_0, "\nEND\n", 5);
+    s_cam_pub_us += (uint32_t)(esp_timer_get_time() - t1);
+
+    s_cam_frames++;
+    s_cam_bytes += (uint32_t)fb->len;
+    s_cam_last_len = (uint32_t)fb->len;
+    eye_release(fb);
+    return true;
+}
+
 /* 空闲时每 CAM_IDLE_GRAB_MS 取一帧丢掉 —— 不是浪费：不取帧的话
  * 自动曝光/自动白平衡会停在最后一次的值，真拍照时第一张是过曝的。 */
 static void cam_task(void *arg)
@@ -434,7 +476,11 @@ static void cam_task(void *arg)
     uint32_t last_log = 0;
 
     while (1) {
-        if (s_connected) {
+        if (s_cam_uart) {
+            cam_uart_one();
+            if (s_cam_rate_ms > 0) vTaskDelay(pdMS_TO_TICKS(s_cam_rate_ms));
+            else vTaskDelay(pdMS_TO_TICKS(1));
+        } else if (s_connected) {
             if (s_cam_stream) {
                 cam_publish_one();
                 if (s_cam_rate_ms > 0) vTaskDelay(pdMS_TO_TICKS(s_cam_rate_ms));
@@ -660,6 +706,150 @@ static void dec_task(void *arg)
     }
 }
 
+/* 命令解析：MQTT 的 <base>/cmd 和串口控制台共用同一份。
+ * 串口也要有，是因为调焦距时板子就插在电脑上，而且串口推流本身要先把波特率切到 1.5M
+ * —— 这条命令必须能在断网时下达。 */
+static void handle_cmd_line(const char *cmd)
+{
+    /* 「MIC 1」开、「MIC 0」关。录完必须关：不关就一直往公网推屋里声音。 */
+    if (strncmp(cmd, "MIC ", 4) == 0) {
+        bool want = (cmd[4] != '0');
+        if (want != s_mic_on) {
+            s_mic_on = want;
+            ESP_LOGI(TAG, "麦克风%s", want ? "开" : "关");
+            publish_state("mic");
+        }
+    } else if (strncmp(cmd, "GATE ", 5) == 0) {
+        s_gate_off = (cmd[5] == '0');
+        ESP_LOGI(TAG, "人声门限 %s", s_gate_off ? "关" : "开");
+        publish_state("gate");
+    } else if (strncmp(cmd, "MODE ", 5) == 0) {
+        int m = (cmd[5] == '1') ? MODE_BTN : MODE_GATE;
+        if (m != s_mode) {
+            s_mode = m;
+            save_mode(m);
+            s_btn_talk_until_us = 0;
+            ESP_LOGI(TAG, "模式切成 %s", m == MODE_BTN ? "随身（按键说话）"
+                                                      : "室内（人声门限）");
+            publish_state("mode");
+        }
+    } else if (strncmp(cmd, "PING", 4) == 0) {
+        /* PC 侧连上就问一句，省得等 30 秒心跳才能判断板子在不在 */
+        publish_state("pong");
+    } else if (strncmp(cmd, "ECHO ", 5) == 0) {
+        /* ECHO 0 关掉"她说话时麦克风闭嘴"的保护（调试打断用，平时别关） */
+        bool want = (cmd[5] != '0');
+        if (want != s_echo_guard) {
+            s_echo_guard = want;
+            ESP_LOGI(TAG, "回声保护%s", want ? "开" : "关");
+            publish_state("echo");
+        }
+    } else if (strncmp(cmd, "CAM ", 4) == 0) {
+        /* CAM SNAP / CAM STREAM 0|1 / CAM RATE <ms> / CAM SIZE VGA|QVGA|SVGA|UXGA */
+        const char *a = cmd + 4;
+        if (strncmp(a, "SNAP", 4) == 0) {
+            if (!eye_ready()) {
+                ESP_LOGW(TAG, "CAM SNAP：这块板没接摄像头");
+            } else if (!s_connected) {
+                ESP_LOGW(TAG, "CAM SNAP：还没连上 broker");
+            } else {
+                cam_publish_one();
+                ESP_LOGI(TAG, "拍了：%lu B（累计 %lu 帧）",
+                         (unsigned long)s_cam_last_len, (unsigned long)s_cam_frames);
+                publish_state("cam");
+            }
+        } else if (strncmp(a, "STREAM", 6) == 0) {
+            /* "CAM STREAM 1" 里 a = "STREAM 1"：下标 6 是空格，7 才是 0/1 */
+            s_cam_stream = (a[7] == '1');
+            ESP_LOGI(TAG, "连续推流 %s", s_cam_stream ? "开" : "关");
+            publish_state("cam");
+        } else if (strncmp(a, "RATE ", 5) == 0) {
+            int ms = atoi(a + 5);
+            if (ms >= 0) s_cam_rate_ms = ms;
+            ESP_LOGI(TAG, "推流间隔 %d ms", s_cam_rate_ms);
+        } else if (strncmp(a, "QUAL ", 5) == 0) {
+            int q = atoi(a + 5);
+            int old = eye_set_quality(q);
+            ESP_LOGI(TAG, "JPEG 质量 %d -> %d", old, q);
+        } else if (strncmp(a, "SIZE ", 5) == 0) {
+            bool ok = eye_set_size(a + 5);
+            ESP_LOGI(TAG, "分辨率 %s（%s）", eye_size_name(), ok ? "ok" : "失败");
+        } else if (strncmp(a, "UART", 4) == 0) {
+        /* "CAM UART 1" 里 a = "UART 1"：下标 5 就是 0/1 */
+        bool on = (a[5] == '1');
+        if (on) {
+            s_cam_stream = false;      /* 两条路别同时烧 */
+            s_cam_uart = false;
+            /* 先告诉对方要换波特率，再真的换 —— 否则对端只能看到一串乱码 */
+            printf("BAUD 1500000\n");
+            fflush(stdout);
+            vTaskDelay(pdMS_TO_TICKS(80));
+            uart_set_baudrate(UART_NUM_0, 1500000);
+            esp_log_level_set("*", ESP_LOG_NONE);
+            s_cam_uart = true;
+        } else {
+            s_cam_uart = false;
+            esp_log_level_set("*", ESP_LOG_INFO);
+            uart_set_baudrate(UART_NUM_0, 115200);
+            uart_flush_input(UART_NUM_0);
+            ESP_LOGI(TAG, "串口推流已停，波特率回到 115200");
+            publish_state("cam");
+        }
+    } else if (strncmp(a, "INFO", 4) == 0) {
+            ESP_LOGI(TAG, "摄像头 %s，%s，推流%s，已发 %lu 帧 / %lu KB，失败 %lu",
+                     eye_ready() ? "在线" : "不在",
+                     eye_size_name(), s_cam_stream ? "中" : "停",
+                     (unsigned long)s_cam_frames,
+                     (unsigned long)(s_cam_bytes / 1024), (unsigned long)s_cam_fail);
+            publish_state("cam");
+        } else {
+            ESP_LOGI(TAG, "CAM 子命令：SNAP / STREAM 0|1 / RATE ms / SIZE VGA|QVGA / QUAL 0-63 / UART 0|1 / INFO");
+        }
+    } else {
+        ESP_LOGI(TAG, "收到指令: %s", cmd);
+    }
+}
+
+/* 串口控制台：一行一条命令，和 MQTT 的 <base>/cmd 走同一个解析器。
+ * 注意：s_cam_uart 为真时这里必须闭嘴 —— 那会儿串口上流的是 JPEG，
+ * 读一字节就毁一帧。 */
+static void uart_console_task(void *arg)
+{
+    (void)arg;
+    char line[128];
+    int len = 0;
+    uint8_t c;
+
+    /* UART0 默认走 ROM 打印，没有驱动；要「读」就得自己装一个。
+     * 装完日志照旧能打（ESP_LOG 走 ROM 那条路），只是多了一份接收缓冲。
+     * 装不上就算了 —— 串口控制台只是方便，不该因为它影响开机。 */
+    if (uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0) != ESP_OK) {
+        ESP_LOGW(TAG, "串口控制台装不上驱动，串口命令不可用（MQTT 命令照旧）");
+        vTaskDelete(NULL);
+        return;
+    }
+    uart_flush_input(UART_NUM_0);
+
+    while (1) {
+        if (s_cam_uart) {
+            len = 0;
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(50)) != 1) continue;
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (len > 0) {
+                line[len] = 0;
+                handle_cmd_line(line);
+                len = 0;
+            }
+            continue;
+        }
+        if (len < (int)sizeof(line) - 1) line[len++] = (char)c;
+    }
+}
+
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
@@ -691,82 +881,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             char cmd[128] = { 0 };
             int n = ev->data_len < (int)sizeof(cmd) - 1 ? ev->data_len : (int)sizeof(cmd) - 1;
             memcpy(cmd, ev->data, n);
-            /* 「MIC 1」开、「MIC 0」关。录完必须关：不关就一直往公网推屋里声音。 */
-            if (strncmp(cmd, "MIC ", 4) == 0) {
-                bool want = (cmd[4] != '0');
-                if (want != s_mic_on) {
-                    s_mic_on = want;
-                    ESP_LOGI(TAG, "麦克风%s", want ? "开" : "关");
-                    publish_state("mic");
-                }
-            } else if (strncmp(cmd, "GATE ", 5) == 0) {
-                s_gate_off = (cmd[5] == '0');
-                ESP_LOGI(TAG, "人声门限 %s", s_gate_off ? "关" : "开");
-                publish_state("gate");
-            } else if (strncmp(cmd, "MODE ", 5) == 0) {
-                int m = (cmd[5] == '1') ? MODE_BTN : MODE_GATE;
-                if (m != s_mode) {
-                    s_mode = m;
-                    save_mode(m);
-                    s_btn_talk_until_us = 0;
-                    ESP_LOGI(TAG, "模式切成 %s", m == MODE_BTN ? "随身（按键说话）"
-                                                              : "室内（人声门限）");
-                    publish_state("mode");
-                }
-            } else if (strncmp(cmd, "PING", 4) == 0) {
-                /* PC 侧连上就问一句，省得等 30 秒心跳才能判断板子在不在 */
-                publish_state("pong");
-            } else if (strncmp(cmd, "ECHO ", 5) == 0) {
-                /* ECHO 0 关掉"她说话时麦克风闭嘴"的保护（调试打断用，平时别关） */
-                bool want = (cmd[5] != '0');
-                if (want != s_echo_guard) {
-                    s_echo_guard = want;
-                    ESP_LOGI(TAG, "回声保护%s", want ? "开" : "关");
-                    publish_state("echo");
-                }
-            } else if (strncmp(cmd, "CAM ", 4) == 0) {
-                /* CAM SNAP / CAM STREAM 0|1 / CAM RATE <ms> / CAM SIZE VGA|QVGA|SVGA|UXGA */
-                const char *a = cmd + 4;
-                if (strncmp(a, "SNAP", 4) == 0) {
-                    if (!eye_ready()) {
-                        ESP_LOGW(TAG, "CAM SNAP：这块板没接摄像头");
-                    } else if (!s_connected) {
-                        ESP_LOGW(TAG, "CAM SNAP：还没连上 broker");
-                    } else {
-                        cam_publish_one();
-                        ESP_LOGI(TAG, "拍了：%lu B（累计 %lu 帧）",
-                                 (unsigned long)s_cam_last_len, (unsigned long)s_cam_frames);
-                        publish_state("cam");
-                    }
-                } else if (strncmp(a, "STREAM", 6) == 0) {
-                    /* "CAM STREAM 1" 里 a = "STREAM 1"：下标 6 是空格，7 才是 0/1 */
-                    s_cam_stream = (a[7] == '1');
-                    ESP_LOGI(TAG, "连续推流 %s", s_cam_stream ? "开" : "关");
-                    publish_state("cam");
-                } else if (strncmp(a, "RATE ", 5) == 0) {
-                    int ms = atoi(a + 5);
-                    if (ms >= 0) s_cam_rate_ms = ms;
-                    ESP_LOGI(TAG, "推流间隔 %d ms", s_cam_rate_ms);
-                } else if (strncmp(a, "QUAL ", 5) == 0) {
-                    int q = atoi(a + 5);
-                    int old = eye_set_quality(q);
-                    ESP_LOGI(TAG, "JPEG 质量 %d -> %d", old, q);
-                } else if (strncmp(a, "SIZE ", 5) == 0) {
-                    bool ok = eye_set_size(a + 5);
-                    ESP_LOGI(TAG, "分辨率 %s（%s）", eye_size_name(), ok ? "ok" : "失败");
-                } else if (strncmp(a, "INFO", 4) == 0) {
-                    ESP_LOGI(TAG, "摄像头 %s，%s，推流%s，已发 %lu 帧 / %lu KB，失败 %lu",
-                             eye_ready() ? "在线" : "不在",
-                             eye_size_name(), s_cam_stream ? "中" : "停",
-                             (unsigned long)s_cam_frames,
-                             (unsigned long)(s_cam_bytes / 1024), (unsigned long)s_cam_fail);
-                    publish_state("cam");
-                } else {
-                    ESP_LOGI(TAG, "CAM 子命令：SNAP / STREAM 0|1 / RATE ms / SIZE VGA|QVGA / QUAL 0-63 / INFO");
-                }
-            } else {
-                ESP_LOGI(TAG, "收到指令: %s", cmd);
-            }
+            handle_cmd_line(cmd);
         }
         break;
 
@@ -1240,6 +1355,7 @@ void app_main(void)
     /* 眼睛：起不来不致命（没接摄像头/线松了），音频和屏幕照跑。 */
     if (eye_init()) {
         xTaskCreate(cam_task, "cam", 6144, NULL, 5, NULL);
+    xTaskCreate(uart_console_task, "con", 4096, NULL, 3, NULL);
     }
     xTaskCreate(btn_task, "btn", 3072, NULL, 3, NULL);
     xTaskCreate(reporter_task, "rep", 4096, NULL, 2, NULL);
