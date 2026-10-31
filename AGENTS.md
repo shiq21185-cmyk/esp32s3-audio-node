@@ -247,6 +247,22 @@ ESP32-S3 + FreeRTOS + TTL 总线舵机 + 屏幕眼睛 + 麦克风/喇叭。
                 spawn 的是 `tools/cam_uart_live.py`，端口默认 COM4（`QQBRIDGE_CAM_SERIAL` 可改），
                 HTTP 默认 8765（`QQBRIDGE_CAM_PORT` 可改）。改完要**重新点一次「一键启动」**才生效
                 （launch-all.ps1 没有重启循环，桥接一退就没了，别在运行中自己 restart）。
+            · 👁️ **她什么时候会看（2026-10-31 21:3x 加，主人定的规则）**：
+                主人原话（m02740）：「可以消息触发，但是不要我发的每一条消息都在触发，
+                  可以是我每一次对话触发一下，等待本次聊天结束，下一次开启聊天才再拍一张，
+                  主动要求和她自己觉得该拍了不在这个限制内」。
+                实现（`qq-bridge-deploy/src/bridge.js`）：
+                  `noteConversationStart(key)` 挂在 `handleIncoming()` 的 `isOwner` 之后 ——
+                  只有**管理员私聊**、且距上一条消息超过 `CONV_GAP_MS`（默认 **20 分钟**，
+                  环境变量 `QQBRIDGE_CONV_GAP_MIN`）才算"新的一次对话"，这时异步起
+                  `tools/body_camera.py --json -n 1 --timeout 12` 拍一张；
+                  `takeConversationGlance(key)` 在拼 prompt 时把它作为 **image 内容块**
+                  塞进这一轮（不是给路径 —— 给路径她只会说"我只有路径没画面"），最多等 6 秒，
+                  超时就先回话、这张留给下一轮。一次对话只消费一张。
+                ⚠️ 显式要求（`body_photo` 工具）**不走这个节流**，随便调。
+                ⚠️ 串口预览开着时（`camUartProc` 在跑）跳过，因为端口被占。
+                ⚠️ 群聊/非管理员一律不拍（约束 5：群里任何人不能触发动作/画面）。
+                📊 流量：一张约 12KB，一天聊 10 次 ≈ 120KB，可以忽略；吃流量的是常驻推流。
             · 📶 **带出门要能上网**（2026-10-31 17:2x 加）：板子只需连上任何有网的 Wi-Fi
               （走云端 EMQX，**不需要和 PC 同一个网段、不需要插着 USB**）。
               多 Wi-Fi 列表在 `firmware/e5-body-cam/main/secrets.h`：
